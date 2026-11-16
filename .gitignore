@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Local environment — never commit real credentials.
+.env
+.env.*
+!.env.example

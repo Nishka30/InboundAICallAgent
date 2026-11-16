@@ -1,0 +1,21 @@
+import { Router, raw } from 'express';
+import { retellWebhookController } from '../controllers/retellWebhook.controller.js';
+
+/** Raw-body limit for webhook payloads (inbound call objects fit easily). */
+const WEBHOOK_BODY_LIMIT = '150kb';
+
+/**
+ * Retell inbound webhook router.
+ *
+ * Uses a RAW body parser (not the global JSON parser) so signature verification
+ * can run over the exact bytes Retell sent — re-serialised JSON would not
+ * verify. This router is therefore mounted in `app.ts` BEFORE `express.json()`.
+ *
+ * `type: () => true` captures the body as a Buffer regardless of the
+ * Content-Type header, so a signature can always be checked.
+ */
+export const retellWebhookRouter: Router = Router();
+
+retellWebhookRouter.post('/', raw({ type: () => true, limit: WEBHOOK_BODY_LIMIT }), (req, res) => {
+  retellWebhookController(req, res);
+});
