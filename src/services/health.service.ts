@@ -1,13 +1,15 @@
 /**
  * Health model for the Inbound service.
  *
- * The scaffold owns no external dependency yet (no database, no provider
- * connection established at boot), so readiness currently reports ready whenever
- * the process is up. The `checks` map is kept as a structured, extensible seam:
- * when the inbound call lifecycle adds a datastore or a Guided Boost reachability
- * probe, each becomes an entry here and readiness turns to 503 if a required one
- * is down — matching the CallScheduler contract.
+ * Liveness reports the process is up. Readiness reports whether the configuration
+ * the inbound flow actually needs is present — WITHOUT exposing any secret value
+ * (only a boolean up/down per check). The one truly required secret is
+ * `RETELL_API_KEY` (no webhook can be verified without it), so its absence makes
+ * the service `not_ready`. Guided Boost config is reported but non-fatal: a call
+ * still runs, degrading to an unknown caller if the CRM is unreachable.
  */
+
+import { env } from '../config/env.js';
 
 export interface LivenessResult {
   status: 'ok';
@@ -18,7 +20,7 @@ export interface LivenessResult {
 
 export interface ReadinessResult {
   status: 'ready' | 'not_ready';
-  checks: Record<string, { status: 'up' | 'down'; latencyMs?: number }>;
+  checks: Record<string, { status: 'up' | 'down' }>;
   timestamp: string;
 }
 
@@ -35,14 +37,21 @@ export function getLiveness(): LivenessResult {
 }
 
 /**
- * Readiness: are all required dependencies reachable? No required dependency
- * exists yet, so this is ready while the process runs. Returns `checks` empty
- * rather than fabricating a dependency status.
+ * Readiness: is the required configuration present? Reports a boolean per check —
+ * never a secret value. `retell_webhook_key` being down makes the service
+ * not_ready; `guided_boost_api` is reported for visibility but does not block
+ * readiness.
  */
 export function getReadiness(): ReadinessResult {
+  const retellConfigured = Boolean(env.RETELL_API_KEY);
+  const guidedBoostConfigured = Boolean(env.GUIDED_BOOST_API_KEY);
+
   return {
-    status: 'ready',
-    checks: {},
+    status: retellConfigured ? 'ready' : 'not_ready',
+    checks: {
+      retell_webhook_key: { status: retellConfigured ? 'up' : 'down' },
+      guided_boost_api: { status: guidedBoostConfigured ? 'up' : 'down' },
+    },
     timestamp: new Date().toISOString(),
   };
 }
