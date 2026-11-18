@@ -54,6 +54,8 @@ export const TOOL = {
   GET_LEAD: 'get_lead',
   CREATE_LEAD: 'create_lead',
   UPDATE_LEAD: 'update_lead',
+  SUBMIT_INQUIRY: 'submit_inquiry',
+  LOG_ISSUE: 'log_issue',
   ADD_CALL_NOTE: 'add_call_note',
   UPDATE_CALL_OUTCOME: 'update_call_outcome',
   GET_AVAILABLE_SLOTS: 'get_available_slots',
@@ -105,6 +107,22 @@ export const updateCallOutcomeArgsSchema = z.object({
   outcome: z.string().trim().min(1).max(64),
   summary: optionalText,
   lead_id: z.string().trim().min(1).max(128).optional(),
+});
+
+export const submitInquiryArgsSchema = leadFieldsSchema.extend({
+  /** The caller's actual request/inquiry in their own words. */
+  inquiry: optionalText,
+  /** True when the caller asked to speak with a human consultant. */
+  consultation_requested: z.boolean().optional(),
+  /** True when this inquiry is being captured because a booking could not complete. */
+  booking_failed: z.boolean().optional(),
+});
+
+export const logIssueArgsSchema = z.object({
+  issue: z.string().trim().min(1).max(5000),
+  urgency: z.enum(['normal', 'urgent']).optional(),
+  /** The caller specifically asked for their existing consultant/owner. */
+  request_existing_consultant: z.boolean().optional(),
 });
 
 export const getAvailableSlotsArgsSchema = z.object({

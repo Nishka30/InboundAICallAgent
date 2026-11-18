@@ -2,13 +2,18 @@ import { logger } from '../lib/logger.js';
 import { maskPhone, normalizePhoneToE164 } from '../lib/phone.js';
 import { CallerType, type CallerTypeName } from '../domain/call.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
-import type { LeadSummary } from '../integrations/guidedBoost/schemas.js';
+import type { SearchResult } from '../integrations/guidedBoost/schemas.js';
 
 /**
  * Result of identifying an inbound caller. Always resolves (never throws): if
  * Guided Boost cannot be reached or the number cannot be normalized, the caller is
  * reported as UNKNOWN and the conversation continues as a new inquiry. A caller is
  * NEVER assumed to be a lead just because they phoned in.
+ *
+ * `GET /api/crm/search` returns a PERSON-centric match keyed by `personKey` (not a
+ * lead id), so an identified caller carries `personKey` + name + current owner. A
+ * `leadId` is NOT available from search; resolving `personKey` → a specific lead
+ * (via `GET /api/crm/persons/:personKey`) is a separate step the booking flow needs.
  */
 export interface CallerIdentity {
   callerType: CallerTypeName;
@@ -18,6 +23,7 @@ export interface CallerIdentity {
   name?: string;
   salesAgentEmail?: string;
   salesAgentName?: string;
+  leadStatus?: string;
   /** True when a lookup was actually performed (vs. skipped for a bad number). */
   lookupPerformed: boolean;
 }
@@ -30,9 +36,10 @@ export interface IdentifyCallerDeps {
  * Identifies the caller from a raw phone number.
  *
  * `normalizePhoneToE164` runs first so the lookup is consistent; an un-normalizable
- * number short-circuits to UNKNOWN without a wasted request. "Existing customer"
- * vs "existing lead" is distinguished by the lead's `is_lead` flag when present
- * (a person who has booked/transacted but is not an open lead reads as a customer).
+ * number short-circuits to UNKNOWN without a wasted request. A phone-matched search
+ * result marks the caller as a KNOWN existing lead (the search result alone does not
+ * cleanly separate "lead" vs "customer" — that needs the person profile — so a match
+ * is reported as EXISTING_LEAD with `leadStatus` for context).
  */
 export async function identifyCaller(
   rawPhone: string | null | undefined,
@@ -47,9 +54,9 @@ export async function identifyCaller(
 
   const client = deps.client ?? new GuidedBoostClient();
 
-  let lead: LeadSummary | null;
+  let match: SearchResult | null;
   try {
-    lead = await client.findLeadByPhone(e164);
+    match = await client.findLeadByPhone(e164);
   } catch (error) {
     // Guided Boost unreachable: do NOT fail the call — continue as unknown.
     logger.warn(
@@ -59,25 +66,23 @@ export async function identifyCaller(
     return { callerType: CallerType.UNKNOWN, e164, lookupPerformed: true };
   }
 
-  if (!lead) {
+  if (!match) {
     return { callerType: CallerType.UNKNOWN, e164, lookupPerformed: true };
   }
 
-  const callerType: CallerTypeName =
-    lead.is_lead === false ? CallerType.EXISTING_CUSTOMER : CallerType.EXISTING_LEAD;
-
   const identity: CallerIdentity = {
-    callerType,
+    callerType: CallerType.EXISTING_LEAD,
     e164,
-    leadId: lead.id,
     lookupPerformed: true,
   };
-  if (lead.person_key) identity.personKey = lead.person_key;
-  if (typeof lead.name === 'string' && lead.name.length > 0) identity.name = lead.name;
-  if (typeof lead.sales_agent_email === 'string' && lead.sales_agent_email.length > 0)
-    identity.salesAgentEmail = lead.sales_agent_email;
-  if (typeof lead.sales_agent === 'string' && lead.sales_agent.length > 0)
-    identity.salesAgentName = lead.sales_agent;
+  if (match.personKey) identity.personKey = match.personKey;
+  if (typeof match.name === 'string' && match.name.length > 0) identity.name = match.name;
+  if (typeof match.salesAgentEmail === 'string' && match.salesAgentEmail.length > 0)
+    identity.salesAgentEmail = match.salesAgentEmail;
+  if (typeof match.salesAgent === 'string' && match.salesAgent.length > 0)
+    identity.salesAgentName = match.salesAgent;
+  if (typeof match.leadStatus === 'string' && match.leadStatus.length > 0)
+    identity.leadStatus = match.leadStatus;
 
   return identity;
 }

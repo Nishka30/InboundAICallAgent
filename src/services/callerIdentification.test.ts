@@ -4,36 +4,26 @@ import { CallerType } from '../domain/call.js';
 import { fakeGuidedBoostClient } from '../testing/helpers.js';
 
 describe('identifyCaller', () => {
-  it('identifies an existing lead by phone', async () => {
+  it('identifies a known caller from a phone-matched search result', async () => {
     const client = fakeGuidedBoostClient({
       findLeadByPhone: vi.fn().mockResolvedValue({
-        id: 'L1',
+        personKey: 'email:ada@example.com',
         name: 'Ada',
-        is_lead: true,
-        person_key: 'lead:L1',
-        sales_agent: 'Grace',
-        sales_agent_email: 'grace@example.com',
+        phone: '+12318310814',
+        salesAgent: 'Grace',
+        salesAgentEmail: 'grace@example.com',
+        leadStatus: 'New Lead',
       }),
     });
 
     const identity = await identifyCaller('+12318310814', { client });
 
     expect(identity.callerType).toBe(CallerType.EXISTING_LEAD);
-    expect(identity.leadId).toBe('L1');
+    expect(identity.personKey).toBe('email:ada@example.com');
     expect(identity.name).toBe('Ada');
-    expect(identity.salesAgentEmail).toBe('grace@example.com');
+    expect(identity.salesAgentName).toBe('Grace');
+    expect(identity.leadStatus).toBe('New Lead');
     expect(identity.e164).toBe('+12318310814');
-  });
-
-  it('identifies an existing customer (is_lead false)', async () => {
-    const client = fakeGuidedBoostClient({
-      findLeadByPhone: vi.fn().mockResolvedValue({ id: 'P9', is_lead: false }),
-    });
-
-    const identity = await identifyCaller('+12318310814', { client });
-
-    expect(identity.callerType).toBe(CallerType.EXISTING_CUSTOMER);
-    expect(identity.leadId).toBe('P9');
   });
 
   it('reports an unknown caller when no lead matches', async () => {

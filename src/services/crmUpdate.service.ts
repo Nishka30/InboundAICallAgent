@@ -49,7 +49,9 @@ export async function finalizeCrmUpdate(
     client = deps.client ?? new GuidedBoostClient();
   } catch (error) {
     repo.recordError(retellCallId, 'crm update: Guided Boost not configured');
-    repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, { reason: 'unconfigured' });
+    repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, {
+      reason: 'unconfigured',
+    });
     logger.error(
       { retellCallId, err: error instanceof Error ? error.name : 'unknown' },
       'crm update: client construction failed',

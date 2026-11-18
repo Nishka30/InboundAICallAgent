@@ -11,7 +11,8 @@ export type GuidedBoostErrorKind =
   | 'rate_limit' // 429 — retryable
   | 'server' // 5xx — retryable
   | 'network' // transport/timeout — retryable
-  | 'contract'; // response did not match the schema — permanent
+  | 'contract' // response did not match the schema — permanent
+  | 'unsupported'; // endpoint is not a confirmed Guided Boost contract — permanent
 
 const RETRYABLE: ReadonlySet<GuidedBoostErrorKind> = new Set(['rate_limit', 'server', 'network']);
 

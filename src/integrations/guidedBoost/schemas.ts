@@ -31,6 +31,67 @@ export const leadSummarySchema = z
 
 export type LeadSummary = z.infer<typeof leadSummarySchema>;
 
+/**
+ * One entry of `GET /api/crm/search` (verified live 2026-11-17). The response is
+ * `{ results: SearchResult[], persons: SearchResult[] }`; a phone/WhatsApp query
+ * returns matches under `results`. A search result is a PERSON-centric record
+ * keyed by `personKey` (NOT a lead `id`), carrying the matched `phone`, the owner
+ * (`salesAgent`), and `matchedIn` (which field matched). Permissive + passthrough.
+ */
+/**
+ * A field read as a string but tolerant of anything: a non-string/number value
+ * becomes `undefined` instead of failing the whole parse. Guided Boost owns this
+ * shape and may send numbers/objects/timestamps in fields we do not interpret, so
+ * a strict `z.string()` on any one of them would wrongly reject an entire match.
+ */
+const looseString = z.preprocess(
+  (v) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : undefined),
+  z.string().optional(),
+);
+
+export const searchResultSchema = z
+  .object({
+    personKey: looseString,
+    name: looseString,
+    email: looseString,
+    phone: looseString,
+    whatsapp: looseString,
+    salesAgent: looseString,
+    salesAgentEmail: looseString,
+    leadStatus: looseString,
+    /** Which field the query matched, e.g. `phone` / `whatsapp` / `email`. */
+    matchedIn: looseString,
+  })
+  .passthrough();
+
+export type SearchResult = z.infer<typeof searchResultSchema>;
+
+/**
+ * Collects candidate search results from a `/api/crm/search` response: the
+ * `results` and `persons` arrays, plus any other top-level array as a fallback.
+ */
+export function extractSearchResults(payload: unknown): SearchResult[] {
+  const out: SearchResult[] = [];
+  const consume = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    for (const row of value) {
+      const parsed = searchResultSchema.safeParse(row);
+      if (parsed.success) out.push(parsed.data);
+    }
+  };
+  if (Array.isArray(payload)) {
+    consume(payload);
+  } else if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>;
+    consume(record['results']);
+    consume(record['persons']);
+    if (out.length === 0) {
+      for (const value of Object.values(record)) consume(value);
+    }
+  }
+  return out;
+}
+
 /** `GET /api/crm/leads/<id>` — permissive detail view. */
 export const leadDetailSchema = z
   .object({
@@ -45,18 +106,137 @@ export const leadDetailSchema = z
 
 export type LeadDetail = z.infer<typeof leadDetailSchema>;
 
-/** `GET /api/crm/persons/<personKey>` — person history (owner, status, counts). */
+/**
+ * One entry of a person's `leads[]` (verified live 2026-11-18). Each entry wraps
+ * the raw lead columns under `captured` / `current` (the lead id + status live in
+ * `current.id` / `current.lead_status`), mirroring the lead-listing/detail shape.
+ */
+export const personLeadEntrySchema = z
+  .object({
+    source: z.string().nullish(),
+    captured: z.record(z.unknown()).nullish(),
+    current: z.record(z.unknown()).nullish(),
+    overrides: z.record(z.unknown()).nullish(),
+  })
+  .passthrough();
+
+export type PersonLeadEntry = z.infer<typeof personLeadEntrySchema>;
+
+/**
+ * One entry of a person's `appointments[]` — the team-booking record (shape
+ * verified in CallScheduler against the live API). Permissive: every field nullish.
+ */
+export const personAppointmentSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]).transform(String).nullish(),
+    lead_id: z.union([z.string(), z.number()]).transform(String).nullish(),
+    starts_at: z.string().nullish(),
+    ends_at: z.string().nullish(),
+    status: z.string().nullish(),
+    meeting_type: z.string().nullish(),
+    customer_tz: z.string().nullish(),
+    agent_email: z.string().nullish(),
+    agent_name: z.string().nullish(),
+  })
+  .passthrough();
+
+export type PersonAppointment = z.infer<typeof personAppointmentSchema>;
+
+/** `GET /api/crm/persons/<personKey>` — person history (owner, status, leads, appts). */
 export const personHistorySchema = z
   .object({
     personKey: z.string().nullish(),
     profile: z.record(z.unknown()).nullish(),
-    leads: z.array(z.unknown()).nullish(),
-    appointments: z.array(z.unknown()).nullish(),
+    leads: z.array(personLeadEntrySchema).nullish(),
+    appointments: z.array(personAppointmentSchema).nullish(),
     notes: z.array(z.unknown()).nullish(),
   })
   .passthrough();
 
 export type PersonHistory = z.infer<typeof personHistorySchema>;
+
+/** The resolved primary lead for a caller, derived from a person's `leads[]`. */
+export interface ResolvedPersonLead {
+  leadId: string;
+  leadStatus?: string;
+  salesAgentEmail?: string;
+  updatedAt?: string;
+}
+
+/** Reads a string field from a lead entry's `current` (preferred) or `captured`. */
+function leadField(entry: PersonLeadEntry, field: string): string | undefined {
+  const fromCurrent = entry.current?.[field];
+  if (typeof fromCurrent === 'string' && fromCurrent.length > 0) return fromCurrent;
+  const fromCaptured = entry.captured?.[field];
+  if (typeof fromCaptured === 'string' && fromCaptured.length > 0) return fromCaptured;
+  return undefined;
+}
+
+/**
+ * Picks the primary lead for an identified caller: the most recently updated,
+ * non-deleted lead with an id. Returns `null` when the person has no resolvable
+ * lead (so the caller is preserved as identified, but no lead id is invented).
+ */
+export function pickPrimaryLead(person: PersonHistory): ResolvedPersonLead | null {
+  const entries = person.leads ?? [];
+  let best: ResolvedPersonLead | null = null;
+  let bestTime = -Infinity;
+  for (const entry of entries) {
+    const deleted = entry.current?.['is_deleted'] ?? entry.captured?.['is_deleted'];
+    if (deleted === true) continue;
+    const id = leadField(entry, 'id');
+    if (!id) continue;
+    const updatedAt = leadField(entry, 'updated_at');
+    const leadStatus = leadField(entry, 'lead_status');
+    const salesAgentEmail = leadField(entry, 'sales_agent_email');
+    const time = updatedAt ? Date.parse(updatedAt) : 0;
+    if (best === null || time > bestTime) {
+      best = {
+        leadId: id,
+        ...(leadStatus ? { leadStatus } : {}),
+        ...(salesAgentEmail ? { salesAgentEmail } : {}),
+        ...(updatedAt ? { updatedAt } : {}),
+      };
+      bestTime = Number.isNaN(time) ? 0 : time;
+    }
+  }
+  return best;
+}
+
+/** True when the person has an appointment that is not cancelled. */
+export function hasActiveAppointment(person: PersonHistory): boolean {
+  return (person.appointments ?? []).some((appt) => {
+    const status = (appt.status ?? '').toLowerCase();
+    return status !== 'cancelled' && status !== 'canceled';
+  });
+}
+
+/** The most relevant active appointment, if any. */
+export function firstActiveAppointment(person: PersonHistory): PersonAppointment | null {
+  return (
+    (person.appointments ?? []).find((appt) => {
+      const status = (appt.status ?? '').toLowerCase();
+      return status !== 'cancelled' && status !== 'canceled';
+    }) ?? null
+  );
+}
+
+/** Reads the owner/sales agent from the person profile, when present. */
+export function readProfileOwner(person: PersonHistory): { name?: string; email?: string } {
+  const profile = person.profile ?? {};
+  const salesAgent = profile['salesAgent'];
+  if (salesAgent && typeof salesAgent === 'object') {
+    const sa = salesAgent as Record<string, unknown>;
+    const name = sa['name'] ?? sa['fullName'];
+    const email = sa['email'];
+    return {
+      ...(typeof name === 'string' && name ? { name } : {}),
+      ...(typeof email === 'string' && email ? { email } : {}),
+    };
+  }
+  if (typeof salesAgent === 'string' && salesAgent) return { name: salesAgent };
+  return {};
+}
 
 /** One availability slot from `GET /api/crm/leads/<id>/team-slots`. */
 export const teamSlotSchema = z
@@ -109,6 +289,19 @@ export const createLeadResponseSchema = z
   })
   .passthrough();
 
+/**
+ * Response for the NEW-lead-from-inbound-inquiry API (David's forthcoming
+ * endpoint). Permissive: we read an id and an ok flag if present, tolerate the rest.
+ */
+export const newLeadResponseSchema = z
+  .object({
+    id: idString.nullish(),
+    lead_id: idString.nullish(),
+    person_key: z.string().nullish(),
+    ok: z.boolean().nullish(),
+  })
+  .passthrough();
+
 /** The `{ "error": "..." }` body Guided Boost returns on failure. */
 export const errorBodySchema = z.object({ error: z.string() }).passthrough();
 
@@ -134,8 +327,7 @@ export function extractSlots(payload: unknown): { slots: TeamSlot[]; mode: strin
         const slot = teamSlotSchema.safeParse(row);
         if (slot.success) slots.push(slot.data);
       }
-      const mode =
-        parsed.success && parsed.data.decision?.mode ? parsed.data.decision.mode : null;
+      const mode = parsed.success && parsed.data.decision?.mode ? parsed.data.decision.mode : null;
       return { slots, mode };
     }
   }

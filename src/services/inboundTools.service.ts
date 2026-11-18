@@ -10,7 +10,9 @@ import {
   getAvailableSlotsArgsSchema,
   getLeadArgsSchema,
   identifyCallerArgsSchema,
+  logIssueArgsSchema,
   readFunctionArgs,
+  submitInquiryArgsSchema,
   TOOL,
   updateCallOutcomeArgsSchema,
   updateLeadArgsSchema,
@@ -21,13 +23,18 @@ import {
   CallOutcome,
   CallerType,
   LifecycleEvent,
+  Urgency,
   type CallRecord,
   type CallOutcomeName,
 } from '../domain/call.js';
 import { callRepository, type CallRepository } from '../repositories/callRepository.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
+import { GuidedBoostError } from '../integrations/guidedBoost/errors.js';
 import { identifyCaller } from './callerIdentification.service.js';
 import { bookConsultation, getAvailableSlots } from './booking.service.js';
+import { resolveExistingCaller } from './existingCaller.service.js';
+import { submitInquiry } from './inquiry.service.js';
+import { defaultEscalationService, type EscalationService } from './escalation.service.js';
 
 /**
  * Backend functions ("tools") the inbound Retell agent calls during a conversation.
@@ -53,6 +60,8 @@ export interface ToolRequestInput {
   now?: number;
   repo?: CallRepository;
   client?: GuidedBoostClient;
+  /** Injected for tests; otherwise the CRM-note escalation service is used. */
+  escalation?: EscalationService;
   config?: Env;
 }
 
@@ -103,7 +112,7 @@ export async function processToolRequest(input: ToolRequestInput): Promise<ToolR
   logger.info({ retellCallId: record.retellCallId, tool: name }, 'inbound tool called');
 
   const client = input.client;
-  const payload = await dispatch(name, request, record, repo, client);
+  const payload = await dispatch(name, request, record, repo, client, input.escalation);
   return { status: 'ok', name, payload };
 }
 
@@ -113,6 +122,7 @@ async function dispatch(
   record: CallRecord,
   repo: CallRepository,
   client: GuidedBoostClient | undefined,
+  escalation: EscalationService | undefined,
 ): Promise<Record<string, unknown>> {
   const rawArgs = readFunctionArgs(request);
 
@@ -125,6 +135,10 @@ async function dispatch(
       return createLeadTool(rawArgs, record, repo, client);
     case TOOL.UPDATE_LEAD:
       return updateLeadTool(rawArgs, record, repo, client);
+    case TOOL.SUBMIT_INQUIRY:
+      return submitInquiryTool(rawArgs, record, repo, client);
+    case TOOL.LOG_ISSUE:
+      return logIssueTool(rawArgs, record, repo, client, escalation);
     case TOOL.ADD_CALL_NOTE:
       return addCallNoteTool(rawArgs, record, client);
     case TOOL.UPDATE_CALL_OUTCOME:
@@ -156,27 +170,75 @@ async function identifyCallerTool(
   client: GuidedBoostClient | undefined,
 ): Promise<Record<string, unknown>> {
   const args = identifyCallerArgsSchema.safeParse(rawArgs);
-  const phone = args.success && args.data.phone_number ? args.data.phone_number : record.callerNumber;
+  const phone =
+    args.success && args.data.phone_number ? args.data.phone_number : record.callerNumber;
 
   const identity = await identifyCaller(phone, client ? { client } : {});
 
+  const known = identity.callerType !== CallerType.UNKNOWN;
+
   const patch: Parameters<CallRepository['update']>[1] = { callerType: identity.callerType };
-  if (identity.leadId) patch.leadId = identity.leadId;
   if (identity.personKey) patch.personKey = identity.personKey;
+  if (identity.salesAgentName) patch.ownerName = identity.salesAgentName;
+  if (identity.salesAgentEmail) patch.ownerEmail = identity.salesAgentEmail;
   repo.update(record.retellCallId, patch);
   if (identity.name) repo.mergeCollectedInfo(record.retellCallId, { name: identity.name });
   repo.recordLifecycle(record.retellCallId, LifecycleEvent.CALLER_IDENTIFIED, {
     callerType: identity.callerType,
-    matched: Boolean(identity.leadId),
+    matched: known,
   });
 
-  const known = identity.callerType !== CallerType.UNKNOWN;
+  if (!known) {
+    repo.recordLifecycle(record.retellCallId, LifecycleEvent.NEW_CALLER, {});
+    return { known: false, caller_type: identity.callerType };
+  }
+
+  repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_CALLER, {});
+
+  // Existing caller: resolve personKey -> leadId + detect an existing consultation
+  // + current owner, using the verified persons endpoint. Preserves identity on any
+  // failure (no duplicate lead), recording a resolution-failure for observability.
+  let resolved;
+  if (identity.personKey) {
+    resolved = await resolveExistingCaller(identity.personKey, client ? { client } : {});
+    const resPatch: Parameters<CallRepository['update']>[1] = {};
+    if (resolved.leadId) {
+      resPatch.leadId = resolved.leadId;
+      resPatch.leadResolved = true;
+    }
+    if (resolved.hasExistingConsultation) resPatch.hasExistingConsultation = true;
+    if (resolved.ownerName) resPatch.ownerName = resolved.ownerName;
+    if (resolved.ownerEmail) resPatch.ownerEmail = resolved.ownerEmail;
+    repo.update(record.retellCallId, resPatch);
+
+    if (resolved.leadId) {
+      repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLVED, {
+        leadId: resolved.leadId,
+      });
+    } else if (resolved.reachable) {
+      repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
+        reason: 'no_lead_for_person',
+      });
+    } else {
+      repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
+        reason: 'unreachable',
+      });
+    }
+  }
+
+  const current = repo.getByRetellCallId(record.retellCallId);
   return {
-    known,
+    known: true,
     caller_type: identity.callerType,
-    ...(identity.leadId ? { lead_id: identity.leadId } : {}),
+    ...(identity.personKey ? { person_key: identity.personKey } : {}),
+    ...(current?.leadId ? { lead_id: current.leadId } : {}),
     ...(identity.name ? { name: identity.name } : {}),
-    ...(identity.salesAgentName ? { existing_owner: identity.salesAgentName } : {}),
+    ...(current?.ownerName ? { existing_owner: current.ownerName } : {}),
+    ...(identity.leadStatus ? { lead_status: identity.leadStatus } : {}),
+    has_existing_consultation: Boolean(current?.hasExistingConsultation),
+    ...(resolved?.existingConsultationSummary
+      ? { existing_consultation: resolved.existingConsultationSummary }
+      : {}),
   };
 }
 
@@ -219,6 +281,12 @@ async function createLeadTool(
   const args = createLeadArgsSchema.safeParse(rawArgs);
   if (!args.success) return { created: false, error: 'Some provided details were invalid.' };
 
+  const data = args.data;
+
+  // Always retain what the caller told us on the local call record, even if
+  // Guided Boost cannot persist it — it still reaches the CRM in the end-of-call note.
+  repo.mergeCollectedInfo(record.retellCallId, collectedFrom(data));
+
   // Avoid duplicate creation within the same call.
   if (record.leadId) {
     return { created: false, already_exists: true, lead_id: record.leadId };
@@ -227,7 +295,6 @@ async function createLeadTool(
   const gb = gbClient(client);
   if (!gb) return { created: false, error: 'Lead creation is unavailable right now.' };
 
-  const data = args.data;
   const phone = data.phone ?? record.callerNumber;
   const input = {
     ...(data.name ? { name: data.name } : {}),
@@ -254,12 +321,20 @@ async function createLeadTool(
     };
     if (created.personKey) patch.personKey = created.personKey;
     repo.update(record.retellCallId, patch);
-    repo.mergeCollectedInfo(record.retellCallId, collectedFrom(data));
     repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_CREATED, {
       leadId: created.leadId,
     });
     return { created: true, lead_id: created.leadId };
   } catch (error) {
+    if (error instanceof GuidedBoostError && error.kind === 'unsupported') {
+      // No confirmed create endpoint yet: details are kept on the call record and
+      // will be written into the end-of-call note once a lead exists / is added.
+      return {
+        created: false,
+        captured: true,
+        reason: 'I’ve noted all of that; a consultant will follow up to set everything up.',
+      };
+    }
     logger.warn({ err: errName(error) }, 'create_lead tool: creation failed');
     return { created: false, error: 'The lead could not be created just now.' };
   }
@@ -301,6 +376,13 @@ async function updateLeadTool(
     });
     return { updated: true, lead_id: leadId };
   } catch (error) {
+    if (error instanceof GuidedBoostError && error.kind === 'unsupported') {
+      return {
+        updated: false,
+        captured: true,
+        reason: 'I’ve noted that; it will be saved with the call summary.',
+      };
+    }
     logger.warn({ err: errName(error) }, 'update_lead tool: update failed');
     // The info is retained locally and will be included in the end-of-call note.
     return { updated: false, error: 'I noted that but could not save it to the CRM just now.' };
@@ -353,7 +435,10 @@ async function getSlotsTool(
 ): Promise<Record<string, unknown>> {
   const args = getAvailableSlotsArgsSchema.safeParse(rawArgs);
   if (!args.success) {
-    return { available: false, reason: 'I need the customer’s timezone to look up available times.' };
+    return {
+      available: false,
+      reason: 'I need the customer’s timezone to look up available times.',
+    };
   }
   if (!record.leadId) {
     return {
@@ -395,7 +480,23 @@ async function bookTool(
     return { booked: false, reason: 'I need to create the lead before I can book a consultation.' };
   }
 
-  repo.update(record.retellCallId, { bookingStatus: BookingStatus.ATTEMPTED });
+  // Duplicate-consultation protection: an identified existing caller who already has
+  // an active appointment is not re-booked (no duplicate consultation). The agent
+  // can capture any changes against the existing booking instead.
+  if (record.hasExistingConsultation) {
+    return {
+      booked: false,
+      already_has_consultation: true,
+      reason:
+        'You already have a consultation scheduled, so I won’t create a duplicate. I can pass along anything you need for it.',
+    };
+  }
+
+  repo.update(record.retellCallId, {
+    bookingStatus: BookingStatus.ATTEMPTED,
+    consultationRequested: true,
+  });
+  repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_REQUESTED, {});
   repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_ATTEMPTED, {
     meetingType: args.data.meeting_type,
   });
@@ -420,16 +521,150 @@ async function bookTool(
       appointmentId: result.appointment_id,
       outcome: CallOutcome.BOOKED,
     });
-    repo.mergeCollectedInfo(record.retellCallId, { consultationPreference: args.data.meeting_type });
+    repo.mergeCollectedInfo(record.retellCallId, {
+      consultationPreference: args.data.meeting_type,
+    });
     repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_CONFIRMED, {
+      appointmentId: result.appointment_id,
+    });
+    repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_BOOKED, {
       appointmentId: result.appointment_id,
     });
     return { ...result };
   }
 
-  repo.update(record.retellCallId, { bookingStatus: BookingStatus.FAILED });
+  // Not booked: record WHY, so the agent can fall back to capturing the inquiry
+  // (submit_inquiry) without losing the request. Never reports success.
+  repo.update(record.retellCallId, {
+    bookingStatus: BookingStatus.FAILED,
+    bookingFailureReason: result.reason.slice(0, 200),
+  });
   repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_FAILED, {});
+  repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_NOT_BOOKED, {});
   return { ...result };
+}
+
+/**
+ * Captures a new caller's inquiry and sends it to the new-lead API so the team can
+ * follow up. The business path for "does not want a consultant" and "booking could
+ * not be completed" — a VALID outcome, not a failure.
+ */
+async function submitInquiryTool(
+  rawArgs: Record<string, unknown>,
+  record: CallRecord,
+  repo: CallRepository,
+  client: GuidedBoostClient | undefined,
+): Promise<Record<string, unknown>> {
+  const args = submitInquiryArgsSchema.safeParse(rawArgs);
+  if (!args.success) {
+    return { captured: false, error: 'Some provided details were invalid.' };
+  }
+  const data = args.data;
+
+  // Always retain everything on the local record first — never lose the inquiry.
+  const collected = collectedFrom(data);
+  if (data.inquiry) collected['inquiry'] = data.inquiry;
+  repo.mergeCollectedInfo(record.retellCallId, collected);
+
+  const patch: Parameters<CallRepository['update']>[1] = {};
+  if (data.consultation_requested === true) patch.consultationRequested = true;
+  if (Object.keys(patch).length > 0) repo.update(record.retellCallId, patch);
+
+  const result = await submitInquiry(record.retellCallId, repo, client ? { client } : {});
+
+  return {
+    captured: true,
+    outcome: result.outcome,
+    ...(result.leadId ? { lead_id: result.leadId } : {}),
+    message:
+      result.outcome === 'sent'
+        ? 'Your inquiry has been sent to our team; a consultant will follow up.'
+        : 'I’ve captured your inquiry so our team can follow up with you.',
+  };
+}
+
+/**
+ * Logs an existing caller's issue. A normal issue becomes a CRM note on the lead
+ * (preserving the owner relationship); an URGENT issue is escalated via the
+ * escalation service (currently an urgent CRM note, isolated so a real escalation
+ * mechanism can plug in later). A request for the existing consultant is recorded.
+ */
+async function logIssueTool(
+  rawArgs: Record<string, unknown>,
+  record: CallRecord,
+  repo: CallRepository,
+  client: GuidedBoostClient | undefined,
+  escalation: EscalationService | undefined,
+): Promise<Record<string, unknown>> {
+  const args = logIssueArgsSchema.safeParse(rawArgs);
+  if (!args.success) return { logged: false, error: 'An issue description is required.' };
+  const { issue } = args.data;
+  const urgent = args.data.urgency === 'urgent';
+
+  repo.mergeCollectedInfo(record.retellCallId, { inquiry: issue });
+  const patch: Parameters<CallRepository['update']>[1] = {
+    urgency: urgent ? Urgency.URGENT : Urgency.NORMAL,
+  };
+  if (args.data.request_existing_consultant === true) patch.requestedExistingConsultant = true;
+  repo.update(record.retellCallId, patch);
+
+  if (!record.leadId) {
+    // Known caller whose lead could not be resolved: keep it locally, do not create
+    // a duplicate lead. It still reaches the CRM in the end-of-call note if a lead
+    // appears; otherwise it is captured for follow-up.
+    repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, {
+      urgent,
+      persisted: 'local_only',
+    });
+    return {
+      logged: true,
+      persisted: 'local',
+      urgent,
+      message: 'I’ve noted your issue for the team to follow up.',
+    };
+  }
+
+  if (urgent) {
+    const service = escalation ?? defaultEscalationService(client ?? undefined);
+    const outcome = service
+      ? await service.escalate({
+          leadId: record.leadId,
+          issue,
+          ownerName: record.ownerName,
+          ownerEmail: record.ownerEmail,
+        })
+      : { escalated: false, via: 'none' as const };
+    repo.recordLifecycle(record.retellCallId, LifecycleEvent.URGENT_ESCALATION, {
+      escalated: outcome.escalated,
+      via: outcome.via,
+    });
+    return {
+      logged: true,
+      urgent: true,
+      escalated: outcome.escalated,
+      message: 'I’ve flagged this as urgent for our team to follow up as a priority.',
+    };
+  }
+
+  // Normal issue: a CRM note on the lead, preserving the owner relationship.
+  const gb = gbClient(client);
+  repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, { urgent: false });
+  if (!gb) return { logged: true, persisted: 'local', message: 'I’ve noted your issue.' };
+
+  const noteLines = [`Inbound call — caller issue: ${issue}`];
+  if (args.data.request_existing_consultant) {
+    noteLines.push('Caller asked to speak with their existing consultant.');
+  }
+  if (record.ownerName || record.ownerEmail) {
+    noteLines.push(`Owner: ${record.ownerName ?? ''} ${record.ownerEmail ?? ''}`.trim());
+  }
+  try {
+    await gb.addCallNote(record.leadId, noteLines.join('\n'));
+    return { logged: true, message: 'I’ve added your issue to your record for follow-up.' };
+  } catch (error) {
+    logger.warn({ err: errName(error) }, 'log_issue tool: CRM note failed');
+    return { logged: true, persisted: 'local', message: 'I’ve noted your issue for follow-up.' };
+  }
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -480,7 +715,11 @@ function normalizeOutcome(raw: string): CallOutcomeName {
 }
 
 function buildBookingNote(
-  data: { confirmed_destination?: string | undefined; notes?: string | undefined; meeting_type: string },
+  data: {
+    confirmed_destination?: string | undefined;
+    notes?: string | undefined;
+    meeting_type: string;
+  },
   record: CallRecord,
 ): string {
   const lines = ['Consultation booked via inbound AI call.'];

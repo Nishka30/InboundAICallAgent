@@ -135,9 +135,10 @@ async function handleInboundHook(json: unknown, config: Env): Promise<InboundWeb
   // leaves the caller as unknown — the hook must return fast and never fail.
   try {
     const identity = await identifyCaller(fromNumber);
-    if (identity.leadId) {
+    if (identity.personKey ?? identity.leadId) {
       dynamicVariables['caller_known'] = 'yes';
-      dynamicVariables['lead_id'] = identity.leadId;
+      if (identity.personKey) dynamicVariables['person_key'] = identity.personKey;
+      if (identity.leadId) dynamicVariables['lead_id'] = identity.leadId;
       if (identity.name) dynamicVariables['customer_name'] = identity.name;
       if (identity.salesAgentName) dynamicVariables['existing_owner'] = identity.salesAgentName;
     }
@@ -149,7 +150,11 @@ async function handleInboundHook(json: unknown, config: Env): Promise<InboundWeb
   }
 
   logger.info(
-    { caller: maskPhone(fromNumber), to: maskPhone(toNumber), known: dynamicVariables['caller_known'] },
+    {
+      caller: maskPhone(fromNumber),
+      to: maskPhone(toNumber),
+      known: dynamicVariables['caller_known'],
+    },
     'inbound hook answered',
   );
 

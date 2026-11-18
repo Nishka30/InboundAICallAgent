@@ -19,11 +19,7 @@ import { z } from 'zod';
  */
 
 /** Voice lifecycle events this service acts on. */
-export const SUPPORTED_LIFECYCLE_EVENTS = [
-  'call_started',
-  'call_ended',
-  'call_analyzed',
-] as const;
+export const SUPPORTED_LIFECYCLE_EVENTS = ['call_started', 'call_ended', 'call_analyzed'] as const;
 export type SupportedLifecycleEvent = (typeof SUPPORTED_LIFECYCLE_EVENTS)[number];
 
 export function isLifecycleEvent(event: string): event is SupportedLifecycleEvent {

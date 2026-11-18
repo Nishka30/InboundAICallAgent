@@ -5,6 +5,8 @@ import {
   CallOutcome,
   CallStatus,
   CallerType,
+  InquiryStatus,
+  Urgency,
   type CallRecord,
   type CallStatusName,
   type CollectedInfo,
@@ -74,6 +76,15 @@ export type CallRecordPatch = Partial<
     | 'recordingUrl'
     | 'bookingStatus'
     | 'appointmentId'
+    | 'bookingFailureReason'
+    | 'consultationRequested'
+    | 'requestedExistingConsultant'
+    | 'inquiryStatus'
+    | 'urgency'
+    | 'leadResolved'
+    | 'hasExistingConsultation'
+    | 'ownerEmail'
+    | 'ownerName'
     | 'crmUpdatedAt'
   >
 >;
@@ -89,8 +100,7 @@ class InMemoryCallRepository implements CallRepository {
       if (input.agentId && !existing.agentId) existing.agentId = input.agentId;
       if (input.inboundNumber && !existing.inboundNumber)
         existing.inboundNumber = input.inboundNumber;
-      if (input.callerNumber && !existing.callerNumber)
-        existing.callerNumber = input.callerNumber;
+      if (input.callerNumber && !existing.callerNumber) existing.callerNumber = input.callerNumber;
       if (input.direction) existing.direction = input.direction;
       this.touch(existing);
       return existing;
@@ -109,6 +119,12 @@ class InMemoryCallRepository implements CallRepository {
       callerType: CallerType.UNKNOWN,
       leadCreated: false,
       bookingStatus: BookingStatus.NONE,
+      consultationRequested: false,
+      requestedExistingConsultant: false,
+      inquiryStatus: InquiryStatus.NONE,
+      urgency: Urgency.NORMAL,
+      leadResolved: false,
+      hasExistingConsultation: false,
       collectedInfo: {},
       lifecycle: [],
       processedEventKeys: [],

@@ -15,16 +15,27 @@ export const LifecycleEvent = {
   INBOUND_RECEIVED: 'INBOUND_RECEIVED',
   CALL_STARTED: 'CALL_STARTED',
   CALLER_IDENTIFIED: 'CALLER_IDENTIFIED',
+  NEW_CALLER: 'NEW_CALLER',
+  EXISTING_CALLER: 'EXISTING_CALLER',
+  LEAD_RESOLVED: 'LEAD_RESOLVED',
+  LEAD_RESOLUTION_FAILED: 'LEAD_RESOLUTION_FAILED',
   LEAD_CREATED: 'LEAD_CREATED',
+  LEAD_CAPTURED: 'LEAD_CAPTURED',
   CONVERSATION_ACTIVE: 'CONVERSATION_ACTIVE',
   TOOL_CALLED: 'TOOL_CALLED',
+  CONSULTATION_REQUESTED: 'CONSULTATION_REQUESTED',
   BOOKING_ATTEMPTED: 'BOOKING_ATTEMPTED',
   BOOKING_CONFIRMED: 'BOOKING_CONFIRMED',
   BOOKING_FAILED: 'BOOKING_FAILED',
+  CONSULTATION_BOOKED: 'CONSULTATION_BOOKED',
+  CONSULTATION_NOT_BOOKED: 'CONSULTATION_NOT_BOOKED',
+  EXISTING_LEAD_ISSUE: 'EXISTING_LEAD_ISSUE',
+  URGENT_ESCALATION: 'URGENT_ESCALATION',
   CALL_ENDED: 'CALL_ENDED',
   CALL_ANALYZED: 'CALL_ANALYZED',
   CRM_UPDATED: 'CRM_UPDATED',
   CRM_UPDATE_FAILED: 'CRM_UPDATE_FAILED',
+  CALL_COMPLETED: 'CALL_COMPLETED',
   ERROR: 'ERROR',
 } as const;
 
@@ -84,6 +95,27 @@ export const BookingStatus = {
 
 export type BookingStatusName = (typeof BookingStatus)[keyof typeof BookingStatus];
 
+/** Delivery state of the captured inquiry to the new-lead API. */
+export const InquiryStatus = {
+  NONE: 'NONE',
+  /** Captured on the call record but not sent (API disabled/unconfigured). */
+  CAPTURED: 'CAPTURED',
+  /** Sent to the new-lead API and accepted. */
+  SENT: 'SENT',
+  /** Send attempted and failed; retained locally for follow-up. */
+  FAILED: 'FAILED',
+} as const;
+
+export type InquiryStatusName = (typeof InquiryStatus)[keyof typeof InquiryStatus];
+
+/** How urgent the caller's issue is (existing-caller flow). */
+export const Urgency = {
+  NORMAL: 'NORMAL',
+  URGENT: 'URGENT',
+} as const;
+
+export type UrgencyName = (typeof Urgency)[keyof typeof Urgency];
+
 /** The ONLY supported consultation channels. Arbitrary values are rejected. */
 export const MEETING_TYPES = ['phone', 'whatsapp', 'video'] as const;
 export type MeetingType = (typeof MEETING_TYPES)[number];
@@ -113,6 +145,8 @@ export interface CollectedInfo {
   interests?: string;
   budget?: string;
   travelStyle?: string;
+  /** The caller's actual inquiry / request in their own words. */
+  inquiry?: string;
   consultationPreference?: MeetingType;
   notes?: string;
   timezone?: string;
@@ -152,6 +186,25 @@ export interface CallRecord {
 
   bookingStatus: BookingStatusName;
   appointmentId?: string;
+  /** Short, non-PII reason a booking could not be completed. */
+  bookingFailureReason?: string;
+
+  // --- Business-flow state ---------------------------------------------------
+  /** The caller asked to speak with a human consultant. */
+  consultationRequested: boolean;
+  /** The caller asked specifically for their existing consultant/owner. */
+  requestedExistingConsultant: boolean;
+  /** Delivery state of the captured inquiry to the new-lead API. */
+  inquiryStatus: InquiryStatusName;
+  /** Urgency of an existing caller's issue. */
+  urgency: UrgencyName;
+  /** True once the existing caller's personKey was resolved to a lead id. */
+  leadResolved: boolean;
+  /** True when the identified caller already has an active appointment. */
+  hasExistingConsultation: boolean;
+  /** The caller's current owner/salesperson, when known. Preserved across the flow. */
+  ownerEmail?: string;
+  ownerName?: string;
 
   collectedInfo: CollectedInfo;
 

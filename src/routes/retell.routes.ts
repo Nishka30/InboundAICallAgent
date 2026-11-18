@@ -17,9 +17,13 @@ const WEBHOOK_BODY_LIMIT = '200kb';
 export const retellWebhookRouter: Router = Router();
 
 // Call lifecycle + inbound hook.
-retellWebhookRouter.post('/', raw({ type: () => true, limit: WEBHOOK_BODY_LIMIT }), (req, res, next) => {
-  retellWebhookController(req, res).catch(next);
-});
+retellWebhookRouter.post(
+  '/',
+  raw({ type: () => true, limit: WEBHOOK_BODY_LIMIT }),
+  (req, res, next) => {
+    retellWebhookController(req, res).catch(next);
+  },
+);
 
 // Agent backend tools (custom functions), dispatched by function name.
 retellWebhookRouter.post(

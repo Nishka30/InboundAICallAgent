@@ -5,18 +5,20 @@ import {
   type GuidedBoostConfig,
 } from '../../config/env.js';
 import { logger } from '../../lib/logger.js';
+import { normalizePhoneToE164 } from '../../lib/phone.js';
 import { classifyStatus, GuidedBoostError, sanitizePath } from './errors.js';
 import {
   createLeadResponseSchema,
   errorBodySchema,
+  extractSearchResults,
   extractSlots,
   leadDetailSchema,
-  leadSummarySchema,
+  newLeadResponseSchema,
   personHistorySchema,
   teamAppointmentResponseSchema,
   type LeadDetail,
-  type LeadSummary,
   type PersonHistory,
+  type SearchResult,
   type TeamSlot,
 } from './schemas.js';
 import type { MeetingType } from '../../domain/call.js';
@@ -35,21 +37,39 @@ import type { MeetingType } from '../../domain/call.js';
  * Reliability: GETs are retried with bounded exponential backoff on 429/5xx/network
  * only; writes are SINGLE-SHOT (a booking/note is not safe to blindly retry).
  *
- * Endpoint confidence:
- *   CONFIRMED (verified in CallScheduler against the live host):
+ * Endpoint confidence (verified against CallScheduler's integration + docs):
+ *   CONFIRMED (used by CallScheduler against the live host):
  *     GET  /api/crm/leads/:id
  *     GET  /api/crm/persons/:personKey
  *     GET  /api/crm/leads/:id/team-slots
  *     POST /api/crm/appointments/team
  *     POST /api/crm/leads/:id/notes
- *   ASSUMED (no confirmed Guided Boost endpoint yet — see PROJECT_CONTEXT.md §10):
- *     GET  /api/crm/leads/search?phone=   (identify caller by phone)
- *     POST /api/crm/leads                 (create a lead for an unknown caller)
- *     PATCH /api/crm/leads/:id            (update a lead)
- *   The ASSUMED reads degrade to "unknown/none" so an inbound call never fails
- *   merely because the endpoint is not yet available; the writes surface a typed
- *   failure the caller handles gracefully.
+ *   EXISTS BUT RESPONSE UNVERIFIED:
+ *     GET  /api/crm/search   — a real Guided Boost route (named in CallScheduler's
+ *       architecture doc, "deliberately unused" because its response was never
+ *       verified). Used here for phone lookup with a DEFENSIVE parse plus an
+ *       explicit phone-match check, so an unexpected shape only ever yields
+ *       "unknown caller" — never a misidentification. The query parameter name is
+ *       not documented (`q` is used); confirm with Guided Boost.
+ *   NOT A CONFIRMED CONTRACT (no such endpoint found in any Guided Boost source or
+ *   the CallScheduler integration):
+ *     create a lead, update lead fields.
+ *   `LEAD_WRITE_ENDPOINTS_CONFIRMED` gates those two writes: while false they do
+ *   NOT fire a request at an unconfirmed path — they raise an `unsupported` error
+ *   the tools turn into a graceful "captured for follow-up" result, and the
+ *   collected info is retained on the local call record. Flip the flag (and set the
+ *   real path/schema) once Guided Boost confirms the endpoints.
  */
+
+/** The phone-lookup search endpoint (real route; response contract unverified). */
+const SEARCH_PATH = '/api/crm/search';
+
+/**
+ * Whether Guided Boost's lead create/update endpoints are confirmed. FALSE until
+ * Guided Boost provides the real contract — see the class doc. Do not flip this to
+ * true without also setting the correct path + request/response schema.
+ */
+const LEAD_WRITE_ENDPOINTS_CONFIRMED = false;
 
 export interface GuidedBoostClientOptions {
   config?: GuidedBoostConfig;
@@ -119,15 +139,22 @@ export class GuidedBoostClient {
   // --- Caller identification --------------------------------------------------
 
   /**
-   * ASSUMED endpoint. Looks up a lead by E.164 phone. Returns the lead summary, or
-   * `null` when none matches OR the endpoint is not available (any permanent
-   * failure) — so an inbound call proceeds as a new inquiry rather than failing.
+   * Looks up a caller by E.164 phone via `GET /api/crm/search`.
+   *
+   * The response (`{ results, persons }`, verified live) is parsed into
+   * person-centric `SearchResult`s keyed by `personKey`. A candidate is accepted
+   * ONLY when its own `phone`/`whatsapp` normalizes to the same E.164, or when the
+   * server explicitly reports it matched a phone field (`matchedIn`) for our exact
+   * query — so an ignored param or a wrong record never misidentifies the caller.
+   * Returns `null` on no match OR any permanent failure (e.g. the endpoint is
+   * unavailable), so the call proceeds as a new inquiry rather than failing.
    */
-  async findLeadByPhone(e164: string): Promise<LeadSummary | null> {
-    const query = new URLSearchParams({ phone: e164 });
+  async findLeadByPhone(e164: string): Promise<SearchResult | null> {
+    // Query-param name is not documented; `q` is the generic search convention.
+    const query = new URLSearchParams({ q: e164 });
     let payload: unknown;
     try {
-      payload = await this.getJson('/api/crm/leads/search', query);
+      payload = await this.getJson(SEARCH_PATH, query);
     } catch (error) {
       if (error instanceof GuidedBoostError && error.permanent) {
         logger.warn(
@@ -138,26 +165,28 @@ export class GuidedBoostClient {
       }
       throw error;
     }
-    return this.firstLeadSummary(payload);
+    return this.matchCallerByPhone(payload, e164);
   }
 
-  private firstLeadSummary(payload: unknown): LeadSummary | null {
-    if (payload === null || payload === undefined) return null;
-    if (Array.isArray(payload)) {
-      for (const row of payload) {
-        const parsed = leadSummarySchema.safeParse(row);
-        if (parsed.success) return parsed.data;
+  /** Accepts a search result whose phone/whatsapp matches, or that matched a phone field. */
+  private matchCallerByPhone(payload: unknown, e164: string): SearchResult | null {
+    const candidates = extractSearchResults(payload);
+    for (const result of candidates) {
+      const phone = normalizePhoneToE164(result.phone ?? null);
+      const whatsapp = normalizePhoneToE164(result.whatsapp ?? null);
+      if (phone === e164 || whatsapp === e164) return result;
+      // No normalizable phone on the record, but the server says it matched a phone
+      // field for our exact E.164 query — trust that server-side match.
+      const matchedIn = (result.matchedIn ?? '').toLowerCase();
+      if (!result.phone && !result.whatsapp && /phone|whatsapp|mobile/.test(matchedIn)) {
+        return result;
       }
-      return null;
     }
-    if (typeof payload === 'object') {
-      const record = payload as Record<string, unknown>;
-      // Direct lead object.
-      const direct = leadSummarySchema.safeParse(record);
-      if (direct.success && typeof record['id'] !== 'undefined') return direct.data;
-      // Or an envelope holding the single array of results.
-      const arrayKey = Object.keys(record).find((k) => Array.isArray(record[k]));
-      if (arrayKey) return this.firstLeadSummary(record[arrayKey]);
+    if (candidates.length > 0) {
+      logger.info(
+        { candidates: candidates.length },
+        'guided boost: search returned candidates but none matched the caller number; unknown',
+      );
     }
     return null;
   }
@@ -190,8 +219,18 @@ export class GuidedBoostClient {
 
   // --- Lead write surface -----------------------------------------------------
 
-  /** ASSUMED endpoint. `POST /api/crm/leads`. Single-shot. */
+  /**
+   * Creates a lead. NOT a confirmed Guided Boost contract: while
+   * `LEAD_WRITE_ENDPOINTS_CONFIRMED` is false this raises `unsupported` WITHOUT a
+   * network call, so we never fire at an unconfirmed path. When Guided Boost
+   * confirms the endpoint, flip the flag and set the real path/schema below.
+   */
   async createLead(input: CreateLeadInput): Promise<CreatedLead> {
+    if (!LEAD_WRITE_ENDPOINTS_CONFIRMED) {
+      throw new GuidedBoostError('unsupported', 'lead creation endpoint is not confirmed', {
+        path: '/api/crm/leads',
+      });
+    }
     const body: Record<string, unknown> = { is_lead: true };
     if (input.name !== undefined) body['name'] = input.name;
     if (input.email !== undefined) body['email'] = input.email;
@@ -212,8 +251,17 @@ export class GuidedBoostClient {
     return { leadId, personKey };
   }
 
-  /** ASSUMED endpoint. `PATCH /api/crm/leads/:id`. Single-shot. */
+  /**
+   * Updates lead fields. NOT a confirmed Guided Boost contract — gated exactly like
+   * {@link createLead}; raises `unsupported` without a network call while the flag
+   * is false.
+   */
   async updateLead(leadId: string, input: CreateLeadInput): Promise<void> {
+    if (!LEAD_WRITE_ENDPOINTS_CONFIRMED) {
+      throw new GuidedBoostError('unsupported', 'lead update endpoint is not confirmed', {
+        path: '/api/crm/leads/:id',
+      });
+    }
     const body: Record<string, unknown> = {};
     if (input.name !== undefined) body['name'] = input.name;
     if (input.email !== undefined) body['email'] = input.email;
@@ -227,6 +275,27 @@ export class GuidedBoostClient {
     if (input.notes !== undefined) body['free_text'] = input.notes;
     if (Object.keys(body).length === 0) return;
     await this.write('PATCH', `/api/crm/leads/${encodeURIComponent(leadId)}`, body);
+  }
+
+  /**
+   * NEW inbound-lead API (David's forthcoming endpoint). Turns a captured inbound
+   * inquiry into a Guided Boost lead. The PATH is configuration-driven and the
+   * feature is OFF unless both `newLeadEnabled` is true and `newLeadPath` is set, so
+   * nothing is ever POSTed to an unconfirmed path — it raises `unsupported` instead.
+   * Single-shot write. Returns the created lead id when the response carries one.
+   */
+  async createLeadFromInboundInquiry(
+    payload: Record<string, unknown>,
+  ): Promise<{ leadId: string | null }> {
+    if (!this.config.newLeadEnabled || !this.config.newLeadPath) {
+      throw new GuidedBoostError('unsupported', 'new-lead API is not configured', {
+        path: '/new-lead',
+      });
+    }
+    const result = await this.write('POST', this.config.newLeadPath, payload);
+    const parsed = newLeadResponseSchema.safeParse(result);
+    const leadId = parsed.success ? (parsed.data.id ?? parsed.data.lead_id ?? null) : null;
+    return { leadId };
   }
 
   /** CONFIRMED. `POST /api/crm/leads/:id/notes` with `{ kind: 'call', note }`. */

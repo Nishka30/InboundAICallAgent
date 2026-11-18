@@ -1,6 +1,11 @@
 import { requireGuidedBoostConfig } from '../config/env.js';
 import { logger } from '../lib/logger.js';
-import { formatSlotLocal, normalizeTimezone, timezoneLabel, zonedDateRangeUtc } from '../lib/timezone.js';
+import {
+  formatSlotLocal,
+  normalizeTimezone,
+  timezoneLabel,
+  zonedDateRangeUtc,
+} from '../lib/timezone.js';
 import { isMeetingType, type MeetingType } from '../domain/call.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
 import { GuidedBoostError } from '../integrations/guidedBoost/errors.js';
@@ -141,7 +146,10 @@ export async function getAvailableSlots(
  * so a stale slot is never booked, and reports success ONLY when Guided Boost
  * returns an appointment.
  */
-export async function bookConsultation(input: BookInput, deps: BookingDeps = {}): Promise<BookResult> {
+export async function bookConsultation(
+  input: BookInput,
+  deps: BookingDeps = {},
+): Promise<BookResult> {
   if (input.confirmed !== true) {
     return {
       booked: false,

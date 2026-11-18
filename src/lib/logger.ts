@@ -6,7 +6,7 @@ import { env, isProduction, isTest } from '../config/env.js';
  * the personal data handled on behalf of callers/leads. Mirrors the
  * CallScheduler redaction set, plus the Retell signature header.
  */
-const REDACTED_PATHS = [
+export const REDACTED_PATHS = [
   'req.headers.authorization',
   'req.headers.cookie',
   'req.headers["x-lead-api-key"]',
