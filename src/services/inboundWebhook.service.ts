@@ -183,7 +183,7 @@ async function handleLifecycleEvent(
   const retellCallId = call.call_id;
 
   // Ensure a record exists (idempotent create).
-  repo.createOrGetInbound({
+  await repo.createOrGetInbound({
     retellCallId,
     agentId: call.agent_id ?? undefined,
     direction: call.direction ?? 'inbound',
@@ -192,21 +192,21 @@ async function handleLifecycleEvent(
   });
 
   // Idempotency: apply each event type at most once per call.
-  const first = repo.markEventProcessed(retellCallId, event);
+  const first = await repo.markEventProcessed(retellCallId, event);
   if (!first) {
     logger.debug({ event, retellCallId }, 'duplicate inbound webhook event ignored');
     return { status: 'processed', event, retellCallId, changed: false };
   }
 
   if (event === 'call_started') {
-    repo.recordLifecycle(retellCallId, LifecycleEvent.INBOUND_RECEIVED, {
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.INBOUND_RECEIVED, {
       inboundNumber: call.to_number ?? null,
     });
-    repo.advanceStatus(retellCallId, CallStatus.IN_PROGRESS);
+    await repo.advanceStatus(retellCallId, CallStatus.IN_PROGRESS);
     const patch: Parameters<CallRepository['update']>[1] = {};
     if (call.start_timestamp) patch.startedAt = new Date(call.start_timestamp).toISOString();
-    repo.update(retellCallId, patch);
-    repo.recordLifecycle(retellCallId, LifecycleEvent.CALL_STARTED, {
+    await repo.update(retellCallId, patch);
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.CALL_STARTED, {
       agentId: call.agent_id ?? null,
     });
     logger.info({ event, retellCallId }, 'inbound call started');
@@ -214,13 +214,13 @@ async function handleLifecycleEvent(
   }
 
   if (event === 'call_ended') {
-    repo.advanceStatus(retellCallId, CallStatus.ENDED);
+    await repo.advanceStatus(retellCallId, CallStatus.ENDED);
     const patch: Parameters<CallRepository['update']>[1] = {};
     if (call.end_timestamp) patch.endedAt = new Date(call.end_timestamp).toISOString();
     if (typeof call.duration_ms === 'number') patch.durationMs = call.duration_ms;
     if (call.disconnection_reason) patch.disconnectionReason = call.disconnection_reason;
-    repo.update(retellCallId, patch);
-    repo.recordLifecycle(retellCallId, LifecycleEvent.CALL_ENDED, {
+    await repo.update(retellCallId, patch);
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.CALL_ENDED, {
       disconnectionReason: call.disconnection_reason ?? null,
     });
     logger.info({ event, retellCallId }, 'inbound call ended');
@@ -228,7 +228,7 @@ async function handleLifecycleEvent(
   }
 
   // call_analyzed: capture artifacts and finalize the CRM update.
-  repo.advanceStatus(retellCallId, CallStatus.ANALYZED);
+  await repo.advanceStatus(retellCallId, CallStatus.ANALYZED);
   const patch: Parameters<CallRepository['update']>[1] = {};
   if (typeof call.transcript === 'string' && call.transcript.length > 0) {
     patch.transcript = call.transcript;
@@ -243,11 +243,11 @@ async function handleLifecycleEvent(
   if (call.end_timestamp) patch.endedAt = new Date(call.end_timestamp).toISOString();
 
   // Refine the outcome, but never downgrade a confirmed booking.
-  const record = repo.getByRetellCallId(retellCallId);
+  const record = await repo.getByRetellCallId(retellCallId);
   patch.outcome = refineOutcome(record, call);
 
-  repo.update(retellCallId, patch);
-  repo.recordLifecycle(retellCallId, LifecycleEvent.CALL_ANALYZED, {
+  await repo.update(retellCallId, patch);
+  await repo.recordLifecycle(retellCallId, LifecycleEvent.CALL_ANALYZED, {
     sentiment: sentiment ?? null,
     hasTranscript: Boolean(patch.transcript),
   });

@@ -155,6 +155,14 @@ const envSchema = z.object({
 
   /** Path for the new-lead API (e.g. `/api/crm/inbound-leads`). Empty = not set. */
   GUIDED_BOOST_NEW_LEAD_PATH: optionalString(),
+
+  // -------------------------------------------------------------------------
+  // Persistence (Neon / Postgres). OPTIONAL: when unset the service uses the
+  // in-memory call store (local dev / tests). When set, the Postgres-backed
+  // repository is used and migrations run at startup. The value is a secret
+  // connection string (contains the password) and is NEVER logged.
+  // -------------------------------------------------------------------------
+  DATABASE_URL: optionalString(),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -183,6 +191,24 @@ export const env: Env = parseEnv(process.env);
 
 export const isProduction = env.NODE_ENV === 'production';
 export const isTest = env.NODE_ENV === 'test';
+
+/**
+ * Whether durable Postgres persistence is enabled. Off in tests (the in-memory
+ * store is used for unit tests regardless of a stray DATABASE_URL in the shell),
+ * on whenever a connection string is configured.
+ */
+export const databaseEnabled = Boolean(env.DATABASE_URL) && !isTest;
+
+/**
+ * Returns the Postgres connection string, or throws a value-free error. Single
+ * enforcement point; the URL (which contains the password) is never echoed.
+ */
+export function requireDatabaseUrl(source: Env = env): string {
+  if (!source.DATABASE_URL) {
+    throw new Error('DATABASE_URL is not configured; Postgres persistence is unavailable.');
+  }
+  return source.DATABASE_URL;
+}
 
 /**
  * Returns the Retell key used to verify inbound webhook signatures, or throws a

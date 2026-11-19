@@ -107,7 +107,7 @@ describe('processInboundWebhook — lifecycle', () => {
     });
 
     expect(result.status).toBe('processed');
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.status).toBe(CallStatus.IN_PROGRESS);
     const events = record?.lifecycle.map((l) => l.event) ?? [];
     expect(events).toContain(LifecycleEvent.INBOUND_RECEIVED);
@@ -138,9 +138,9 @@ describe('processInboundWebhook — lifecycle', () => {
     expect(second.status === 'processed' && second.changed).toBe(false);
     // Lifecycle not duplicated.
     const starts =
-      repo
-        .getByRetellCallId(CALL_ID)
-        ?.lifecycle.filter((l) => l.event === LifecycleEvent.CALL_STARTED) ?? [];
+      (await repo.getByRetellCallId(CALL_ID))?.lifecycle.filter(
+        (l) => l.event === LifecycleEvent.CALL_STARTED,
+      ) ?? [];
     expect(starts).toHaveLength(1);
   });
 
@@ -152,7 +152,7 @@ describe('processInboundWebhook — lifecycle', () => {
 
     await processInboundWebhook({ ...startedPayload(now), apiKey: TEST_API_KEY, now, repo });
     // A tool identified the caller's lead earlier in the call.
-    repo.update(CALL_ID, { leadId: 'L42' });
+    await repo.update(CALL_ID, { leadId: 'L42' });
     await processInboundWebhook({
       ...analyzedPayload(now),
       apiKey: TEST_API_KEY,
@@ -161,7 +161,7 @@ describe('processInboundWebhook — lifecycle', () => {
       crmClient,
     });
 
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.status).toBe(CallStatus.ANALYZED);
     expect(record?.transcript).toContain('Everest');
     expect(record?.summary).toContain('Everest');
@@ -179,7 +179,7 @@ describe('processInboundWebhook — lifecycle', () => {
     const now = Date.now();
 
     await processInboundWebhook({ ...startedPayload(now), apiKey: TEST_API_KEY, now, repo });
-    repo.update(CALL_ID, { leadId: 'L42' });
+    await repo.update(CALL_ID, { leadId: 'L42' });
     const result = await processInboundWebhook({
       ...analyzedPayload(now),
       apiKey: TEST_API_KEY,
@@ -189,7 +189,7 @@ describe('processInboundWebhook — lifecycle', () => {
     });
 
     expect(result.status).toBe('processed');
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.crmUpdatedAt).toBeUndefined();
     expect(record?.lifecycle.map((l) => l.event)).toContain(LifecycleEvent.CRM_UPDATE_FAILED);
     expect(record?.errors.length).toBeGreaterThan(0);
@@ -199,7 +199,7 @@ describe('processInboundWebhook — lifecycle', () => {
     const repo = createInMemoryCallRepository();
     const now = Date.now();
     await processInboundWebhook({ ...startedPayload(now), apiKey: TEST_API_KEY, now, repo });
-    repo.update(CALL_ID, { leadId: 'L42', bookingStatus: BookingStatus.CONFIRMED });
+    await repo.update(CALL_ID, { leadId: 'L42', bookingStatus: BookingStatus.CONFIRMED });
     const crmClient = fakeGuidedBoostClient();
     await processInboundWebhook({
       ...analyzedPayload(now),
@@ -209,7 +209,7 @@ describe('processInboundWebhook — lifecycle', () => {
       crmClient,
     });
 
-    expect(repo.getByRetellCallId(CALL_ID)?.outcome).toBe(CallOutcome.BOOKED);
+    expect((await repo.getByRetellCallId(CALL_ID))?.outcome).toBe(CallOutcome.BOOKED);
   });
 
   it('answers the call_inbound hook with dynamic variables', async () => {

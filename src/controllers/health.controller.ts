@@ -7,7 +7,7 @@ export function healthCheck(_req: Request, res: Response): void {
 }
 
 /** GET /health/ready — readiness. 503 when a required dependency is down. */
-export function readinessCheck(_req: Request, res: Response): void {
-  const result = getReadiness();
+export async function readinessCheck(_req: Request, res: Response): Promise<void> {
+  const result = await getReadiness();
   res.status(result.status === 'ready' ? 200 : 503).json(result);
 }

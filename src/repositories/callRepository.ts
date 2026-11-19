@@ -13,37 +13,40 @@ import {
   type LifecycleEntry,
   type LifecycleEventName,
 } from '../domain/call.js';
+import { databaseEnabled } from '../config/env.js';
+import { PostgresCallRepository } from './postgresCallRepository.js';
 
 /**
- * In-memory inbound call store.
+ * Inbound call store.
  *
- * This is the MINIMAL persistence the first working version needs: enough to run
- * one call, keep webhooks + tools idempotent, and answer "what happened to this
- * inbound call?" for its lifetime. It is intentionally behind a small interface so
- * it can be swapped for a durable store (Postgres/Prisma, mirroring CallScheduler's
- * `CallRecord`) WITHOUT changing any caller.
+ * The interface is ASYNC so it can be backed by Postgres (the production store)
+ * or by the in-memory implementation below (unit tests, and local dev without a
+ * DATABASE_URL). All reads and writes return promises; callers await them. The
+ * contract is identical across implementations, which is what the test suite
+ * verifies.
  *
- * LIMITATION (documented, not hidden): state lives in process memory, so it does
- * not survive a restart and is not shared across instances. That is acceptable for
- * a single-instance first version and a single live test; durability is a
- * follow-up (see README / PROJECT_CONTEXT.md).
+ * The lead binding is always taken server-side from the Retell `call_id`; a lead
+ * id supplied by the model is only ever a hint.
  */
 export interface CallRepository {
-  createOrGetInbound(input: CreateInboundInput): CallRecord;
-  getByRetellCallId(retellCallId: string): CallRecord | undefined;
-  getById(id: string): CallRecord | undefined;
-  update(retellCallId: string, patch: CallRecordPatch): CallRecord | undefined;
-  advanceStatus(retellCallId: string, status: CallStatusName): CallRecord | undefined;
+  createOrGetInbound(input: CreateInboundInput): Promise<CallRecord>;
+  getByRetellCallId(retellCallId: string): Promise<CallRecord | undefined>;
+  getById(id: string): Promise<CallRecord | undefined>;
+  update(retellCallId: string, patch: CallRecordPatch): Promise<CallRecord | undefined>;
+  advanceStatus(retellCallId: string, status: CallStatusName): Promise<CallRecord | undefined>;
   recordLifecycle(
     retellCallId: string,
     event: LifecycleEventName,
     detail?: Record<string, unknown>,
-  ): CallRecord | undefined;
-  mergeCollectedInfo(retellCallId: string, info: Partial<CollectedInfo>): CallRecord | undefined;
+  ): Promise<CallRecord | undefined>;
+  mergeCollectedInfo(
+    retellCallId: string,
+    info: Partial<CollectedInfo>,
+  ): Promise<CallRecord | undefined>;
   /** Returns true the FIRST time an event key is seen; false on every repeat. */
-  markEventProcessed(retellCallId: string, eventKey: string): boolean;
-  recordError(retellCallId: string, note: string): void;
-  count(): number;
+  markEventProcessed(retellCallId: string, eventKey: string): Promise<boolean>;
+  recordError(retellCallId: string, note: string): Promise<void>;
+  count(): Promise<number>;
 }
 
 export interface CreateInboundInput {
@@ -89,11 +92,20 @@ export type CallRecordPatch = Partial<
   >
 >;
 
+/**
+ * In-memory inbound call store. Authoritative for unit tests and used as the
+ * local-dev fallback when no DATABASE_URL is set. State lives in process memory
+ * (does not survive a restart, not shared across instances) — which is exactly
+ * why production uses the Postgres implementation instead.
+ */
+/* eslint-disable @typescript-eslint/require-await --
+   These methods are intentionally async to implement the async CallRepository
+   interface; the in-memory store simply has no awaitable work to do. */
 class InMemoryCallRepository implements CallRepository {
   private readonly byRetellId = new Map<string, CallRecord>();
   private readonly byId = new Map<string, CallRecord>();
 
-  createOrGetInbound(input: CreateInboundInput): CallRecord {
+  async createOrGetInbound(input: CreateInboundInput): Promise<CallRecord> {
     const existing = this.byRetellId.get(input.retellCallId);
     if (existing) {
       // Fill in fields that may only now be known, without overwriting good data.
@@ -137,15 +149,15 @@ class InMemoryCallRepository implements CallRepository {
     return record;
   }
 
-  getByRetellCallId(retellCallId: string): CallRecord | undefined {
+  async getByRetellCallId(retellCallId: string): Promise<CallRecord | undefined> {
     return this.byRetellId.get(retellCallId);
   }
 
-  getById(id: string): CallRecord | undefined {
+  async getById(id: string): Promise<CallRecord | undefined> {
     return this.byId.get(id);
   }
 
-  update(retellCallId: string, patch: CallRecordPatch): CallRecord | undefined {
+  async update(retellCallId: string, patch: CallRecordPatch): Promise<CallRecord | undefined> {
     const record = this.byRetellId.get(retellCallId);
     if (!record) return undefined;
     Object.assign(record, patch);
@@ -154,7 +166,10 @@ class InMemoryCallRepository implements CallRepository {
   }
 
   /** Moves status forward only; never downgrades on a late/duplicate webhook. */
-  advanceStatus(retellCallId: string, status: CallStatusName): CallRecord | undefined {
+  async advanceStatus(
+    retellCallId: string,
+    status: CallStatusName,
+  ): Promise<CallRecord | undefined> {
     const record = this.byRetellId.get(retellCallId);
     if (!record) return undefined;
     if (CALL_STATUS_RANK[status] >= CALL_STATUS_RANK[record.status]) {
@@ -164,11 +179,11 @@ class InMemoryCallRepository implements CallRepository {
     return record;
   }
 
-  recordLifecycle(
+  async recordLifecycle(
     retellCallId: string,
     event: LifecycleEventName,
     detail?: Record<string, unknown>,
-  ): CallRecord | undefined {
+  ): Promise<CallRecord | undefined> {
     const record = this.byRetellId.get(retellCallId);
     if (!record) return undefined;
     const entry: LifecycleEntry = {
@@ -181,7 +196,10 @@ class InMemoryCallRepository implements CallRepository {
     return record;
   }
 
-  mergeCollectedInfo(retellCallId: string, info: Partial<CollectedInfo>): CallRecord | undefined {
+  async mergeCollectedInfo(
+    retellCallId: string,
+    info: Partial<CollectedInfo>,
+  ): Promise<CallRecord | undefined> {
     const record = this.byRetellId.get(retellCallId);
     if (!record) return undefined;
     for (const [key, value] of Object.entries(info)) {
@@ -193,7 +211,7 @@ class InMemoryCallRepository implements CallRepository {
     return record;
   }
 
-  markEventProcessed(retellCallId: string, eventKey: string): boolean {
+  async markEventProcessed(retellCallId: string, eventKey: string): Promise<boolean> {
     const record = this.byRetellId.get(retellCallId);
     if (!record) return false;
     if (record.processedEventKeys.includes(eventKey)) return false;
@@ -202,14 +220,14 @@ class InMemoryCallRepository implements CallRepository {
     return true;
   }
 
-  recordError(retellCallId: string, note: string): void {
+  async recordError(retellCallId: string, note: string): Promise<void> {
     const record = this.byRetellId.get(retellCallId);
     if (!record) return;
     record.errors.push(`${new Date().toISOString()} ${note}`);
     this.touch(record);
   }
 
-  count(): number {
+  async count(): Promise<number> {
     return this.byRetellId.size;
   }
 
@@ -217,11 +235,18 @@ class InMemoryCallRepository implements CallRepository {
     record.updatedAt = new Date().toISOString();
   }
 }
+/* eslint-enable @typescript-eslint/require-await */
 
-/** Process-wide singleton. Swap the implementation here to add durability. */
-export const callRepository: CallRepository = new InMemoryCallRepository();
+/**
+ * Process-wide singleton. Postgres in the real application (when DATABASE_URL is
+ * configured), in-memory for tests and local dev. Services may still be handed an
+ * explicit repository (dependency injection) — this is only the default.
+ */
+export const callRepository: CallRepository = databaseEnabled
+  ? new PostgresCallRepository()
+  : new InMemoryCallRepository();
 
-/** Exposed for tests that need a fresh, isolated store. */
+/** Exposed for tests that need a fresh, isolated in-memory store. */
 export function createInMemoryCallRepository(): CallRepository {
   return new InMemoryCallRepository();
 }

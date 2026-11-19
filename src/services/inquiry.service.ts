@@ -62,7 +62,7 @@ export async function submitInquiry(
   repo: CallRepository,
   deps: SubmitInquiryDeps = {},
 ): Promise<SubmitInquiryResult> {
-  const record = repo.getByRetellCallId(retellCallId);
+  const record = await repo.getByRetellCallId(retellCallId);
   if (!record) return { outcome: 'failed' };
 
   let client: GuidedBoostClient | null;
@@ -73,8 +73,8 @@ export async function submitInquiry(
   }
 
   if (!client) {
-    repo.update(retellCallId, { inquiryStatus: InquiryStatus.CAPTURED });
-    repo.recordLifecycle(retellCallId, LifecycleEvent.LEAD_CAPTURED, { delivery: 'local_only' });
+    await repo.update(retellCallId, { inquiryStatus: InquiryStatus.CAPTURED });
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.LEAD_CAPTURED, { delivery: 'local_only' });
     return { outcome: 'captured' };
   }
 
@@ -87,8 +87,8 @@ export async function submitInquiry(
       patch.leadId = created.leadId;
       patch.leadCreated = true;
     }
-    repo.update(retellCallId, patch);
-    repo.recordLifecycle(retellCallId, LifecycleEvent.LEAD_CAPTURED, {
+    await repo.update(retellCallId, patch);
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.LEAD_CAPTURED, {
       delivery: 'sent',
       ...(created.leadId ? { leadId: created.leadId } : {}),
     });
@@ -96,13 +96,13 @@ export async function submitInquiry(
   } catch (error) {
     if (error instanceof GuidedBoostError && error.kind === 'unsupported') {
       // New-lead API not configured yet: keep the inquiry locally for follow-up.
-      repo.update(retellCallId, { inquiryStatus: InquiryStatus.CAPTURED });
-      repo.recordLifecycle(retellCallId, LifecycleEvent.LEAD_CAPTURED, { delivery: 'pending_api' });
+      await repo.update(retellCallId, { inquiryStatus: InquiryStatus.CAPTURED });
+      await repo.recordLifecycle(retellCallId, LifecycleEvent.LEAD_CAPTURED, { delivery: 'pending_api' });
       return { outcome: 'captured' };
     }
-    repo.recordError(retellCallId, 'inquiry submit failed');
-    repo.update(retellCallId, { inquiryStatus: InquiryStatus.FAILED });
-    repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, {
+    await repo.recordError(retellCallId, 'inquiry submit failed');
+    await repo.update(retellCallId, { inquiryStatus: InquiryStatus.FAILED });
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, {
       reason: 'inquiry_submit',
     });
     logger.error(

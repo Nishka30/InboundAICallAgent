@@ -19,15 +19,15 @@ function tool(name: string, args: Record<string, unknown>) {
   );
 }
 
-function seeded(leadId?: string): CallRepository {
+async function seeded(leadId?: string): Promise<CallRepository> {
   const repo = createInMemoryCallRepository();
-  repo.createOrGetInbound({ retellCallId: CALL_ID, callerNumber: '+12318310814' });
-  if (leadId) repo.update(CALL_ID, { leadId });
+  await repo.createOrGetInbound({ retellCallId: CALL_ID, callerNumber: '+12318310814' });
+  if (leadId) await repo.update(CALL_ID, { leadId });
   return repo;
 }
 
-function events(repo: CallRepository): string[] {
-  return repo.getByRetellCallId(CALL_ID)?.lifecycle.map((l) => l.event) ?? [];
+async function events(repo: CallRepository): Promise<string[]> {
+  return (await repo.getByRetellCallId(CALL_ID))?.lifecycle.map((l) => l.event) ?? [];
 }
 
 type ToolExtra = Omit<Parameters<typeof processToolRequest>[0], 'rawBody' | 'signature' | 'apiKey'>;
@@ -41,15 +41,15 @@ async function run(name: string, args: Record<string, unknown>, extra: ToolExtra
 
 describe('new caller flow', () => {
   it('identifies an unknown caller as NEW', async () => {
-    const repo = seeded();
+    const repo = await seeded();
     const client = fakeGuidedBoostClient({ findLeadByPhone: vi.fn().mockResolvedValue(null) });
     const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
     if (result.status === 'ok') expect(result.payload['known']).toBe(false);
-    expect(events(repo)).toContain(LifecycleEvent.NEW_CALLER);
+    expect(await events(repo)).toContain(LifecycleEvent.NEW_CALLER);
   });
 
   it('captures the inquiry when the caller does not want a consultant (API pending)', async () => {
-    const repo = seeded();
+    const repo = await seeded();
     const client = fakeGuidedBoostClient({
       createLeadFromInboundInquiry: vi
         .fn()
@@ -69,15 +69,15 @@ describe('new caller flow', () => {
       expect(result.payload['captured']).toBe(true);
       expect(result.payload['outcome']).toBe('captured');
     }
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.inquiryStatus).toBe(InquiryStatus.CAPTURED);
     expect(record?.collectedInfo.destination).toBe('Everest');
     expect(record?.collectedInfo.inquiry).toContain('Everest');
-    expect(events(repo)).toContain(LifecycleEvent.LEAD_CAPTURED);
+    expect(await events(repo)).toContain(LifecycleEvent.LEAD_CAPTURED);
   });
 
   it('sends the inquiry to the new-lead API when configured', async () => {
-    const repo = seeded();
+    const repo = await seeded();
     const client = fakeGuidedBoostClient({
       createLeadFromInboundInquiry: vi.fn().mockResolvedValue({ leadId: 'NL1' }),
     });
@@ -90,11 +90,11 @@ describe('new caller flow', () => {
       expect(result.payload['outcome']).toBe('sent');
       expect(result.payload['lead_id']).toBe('NL1');
     }
-    expect(repo.getByRetellCallId(CALL_ID)?.inquiryStatus).toBe(InquiryStatus.SENT);
+    expect((await repo.getByRetellCallId(CALL_ID))?.inquiryStatus).toBe(InquiryStatus.SENT);
   });
 
   it('wants a consultant but booking fails → inquiry captured (not a failure)', async () => {
-    const repo = seeded('L1');
+    const repo = await seeded('L1');
     const client = fakeGuidedBoostClient({
       // chosen slot not in the returned set → booking refused
       getTeamSlots: vi
@@ -114,10 +114,10 @@ describe('new caller flow', () => {
       { repo, client },
     );
     if (book.status === 'ok') expect(book.payload['booked']).toBe(false);
-    const afterBook = repo.getByRetellCallId(CALL_ID);
+    const afterBook = (await repo.getByRetellCallId(CALL_ID));
     expect(afterBook?.bookingStatus).toBe(BookingStatus.FAILED);
     expect(afterBook?.bookingFailureReason).toBeTruthy();
-    expect(events(repo)).toContain(LifecycleEvent.CONSULTATION_NOT_BOOKED);
+    expect(await events(repo)).toContain(LifecycleEvent.CONSULTATION_NOT_BOOKED);
 
     const inquiry = await run(
       TOOL.SUBMIT_INQUIRY,
@@ -128,7 +128,7 @@ describe('new caller flow', () => {
   });
 
   it('missing optional info does not break inquiry capture', async () => {
-    const repo = seeded();
+    const repo = await seeded();
     const client = fakeGuidedBoostClient({
       createLeadFromInboundInquiry: vi.fn().mockResolvedValue({ leadId: null }),
     });
@@ -167,7 +167,7 @@ describe('existing caller flow', () => {
   }
 
   it('resolves personKey → leadId with no existing consultation', async () => {
-    const repo = seeded();
+    const repo = await seeded();
     const client = identifyClient({ getPerson: vi.fn().mockResolvedValue(personWith('L5')) });
     const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
 
@@ -176,15 +176,15 @@ describe('existing caller flow', () => {
       expect(result.payload['lead_id']).toBe('L5');
       expect(result.payload['has_existing_consultation']).toBe(false);
     }
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.leadResolved).toBe(true);
     expect(record?.leadId).toBe('L5');
-    expect(events(repo)).toContain(LifecycleEvent.EXISTING_CALLER);
-    expect(events(repo)).toContain(LifecycleEvent.LEAD_RESOLVED);
+    expect(await events(repo)).toContain(LifecycleEvent.EXISTING_CALLER);
+    expect(await events(repo)).toContain(LifecycleEvent.LEAD_RESOLVED);
   });
 
   it('detects an existing consultation', async () => {
-    const repo = seeded();
+    const repo = await seeded();
     const client = identifyClient({
       getPerson: vi.fn().mockResolvedValue(
         personWith('L5', [
@@ -202,12 +202,12 @@ describe('existing caller flow', () => {
       expect(result.payload['has_existing_consultation']).toBe(true);
       expect(result.payload['existing_consultation']).toContain('phone');
     }
-    expect(repo.getByRetellCallId(CALL_ID)?.hasExistingConsultation).toBe(true);
+    expect((await repo.getByRetellCallId(CALL_ID))?.hasExistingConsultation).toBe(true);
   });
 
   it('does not duplicate a consultation for a caller who already has one', async () => {
-    const repo = seeded('L5');
-    repo.update(CALL_ID, { hasExistingConsultation: true });
+    const repo = await seeded('L5');
+    await repo.update(CALL_ID, { hasExistingConsultation: true });
     const getTeamSlots = vi.fn();
     const client = fakeGuidedBoostClient({ getTeamSlots });
     const result = await run(
@@ -228,7 +228,7 @@ describe('existing caller flow', () => {
   });
 
   it('logs a simple issue as a CRM note', async () => {
-    const repo = seeded('L5');
+    const repo = await seeded('L5');
     const addCallNote = vi.fn().mockResolvedValue(undefined);
     const client = fakeGuidedBoostClient({ addCallNote });
     const result = await run(
@@ -238,11 +238,11 @@ describe('existing caller flow', () => {
     );
     if (result.status === 'ok') expect(result.payload['logged']).toBe(true);
     expect(addCallNote).toHaveBeenCalledTimes(1);
-    expect(events(repo)).toContain(LifecycleEvent.EXISTING_LEAD_ISSUE);
+    expect(await events(repo)).toContain(LifecycleEvent.EXISTING_LEAD_ISSUE);
   });
 
   it('escalates an urgent issue through the escalation service', async () => {
-    const repo = seeded('L5');
+    const repo = await seeded('L5');
     const escalate = vi.fn().mockResolvedValue({ escalated: true, via: 'crm_note' });
     const escalation: EscalationService = { escalate };
     const client = fakeGuidedBoostClient();
@@ -256,13 +256,13 @@ describe('existing caller flow', () => {
       expect(result.payload['escalated']).toBe(true);
     }
     expect(escalate).toHaveBeenCalledTimes(1);
-    expect(repo.getByRetellCallId(CALL_ID)?.urgency).toBe(Urgency.URGENT);
-    expect(events(repo)).toContain(LifecycleEvent.URGENT_ESCALATION);
+    expect((await repo.getByRetellCallId(CALL_ID))?.urgency).toBe(Urgency.URGENT);
+    expect(await events(repo)).toContain(LifecycleEvent.URGENT_ESCALATION);
   });
 
   it('records a request for the existing consultant', async () => {
-    const repo = seeded('L5');
-    repo.update(CALL_ID, { ownerName: 'Grace' });
+    const repo = await seeded('L5');
+    await repo.update(CALL_ID, { ownerName: 'Grace' });
     const addCallNote = vi.fn().mockResolvedValue(undefined);
     const client = fakeGuidedBoostClient({ addCallNote });
     await run(
@@ -270,13 +270,13 @@ describe('existing caller flow', () => {
       { issue: 'Please have my consultant call me', request_existing_consultant: true },
       { repo, client },
     );
-    expect(repo.getByRetellCallId(CALL_ID)?.requestedExistingConsultant).toBe(true);
+    expect((await repo.getByRetellCallId(CALL_ID))?.requestedExistingConsultant).toBe(true);
     const note = (addCallNote.mock.calls[0]?.[1] ?? '') as string;
     expect(note).toContain('existing consultant');
   });
 
   it('continues safely when the person lookup is unavailable', async () => {
-    const repo = seeded();
+    const repo = await seeded();
     const client = identifyClient({
       getPerson: vi.fn().mockRejectedValue(new Error('gb down')),
     });
@@ -286,10 +286,10 @@ describe('existing caller flow', () => {
       expect(result.payload['person_key']).toBe('email:ada@x.com');
       expect(result.payload['lead_id']).toBeUndefined();
     }
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.leadResolved).toBe(false);
     expect(record?.leadId).toBeUndefined();
-    expect(events(repo)).toContain(LifecycleEvent.LEAD_RESOLUTION_FAILED);
+    expect(await events(repo)).toContain(LifecycleEvent.LEAD_RESOLUTION_FAILED);
   });
 });
 
@@ -297,7 +297,7 @@ describe('existing caller flow', () => {
 
 describe('tool infrastructure', () => {
   it('rejects an invalid log_issue payload', async () => {
-    const repo = seeded('L5');
+    const repo = await seeded('L5');
     const client = fakeGuidedBoostClient();
     const result = await run(TOOL.LOG_ISSUE, {}, { repo, client });
     if (result.status === 'ok') expect(result.payload['logged']).toBe(false);

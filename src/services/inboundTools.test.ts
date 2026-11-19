@@ -19,10 +19,10 @@ function toolPayload(name: string, args: Record<string, unknown>, now = Date.now
   );
 }
 
-function seededRepo(leadId?: string): CallRepository {
+async function seededRepo(leadId?: string): Promise<CallRepository> {
   const repo = createInMemoryCallRepository();
-  repo.createOrGetInbound({ retellCallId: CALL_ID, callerNumber: '+12318310814' });
-  if (leadId) repo.update(CALL_ID, { leadId });
+  await repo.createOrGetInbound({ retellCallId: CALL_ID, callerNumber: '+12318310814' });
+  if (leadId) await repo.update(CALL_ID, { leadId });
   return repo;
 }
 
@@ -46,7 +46,7 @@ describe('processToolRequest — security', () => {
 
 describe('identify_caller tool', () => {
   it('identifies a known caller and records the person key', async () => {
-    const repo = seededRepo();
+    const repo = await seededRepo();
     const client = fakeGuidedBoostClient({
       findLeadByPhone: vi
         .fn()
@@ -68,13 +68,13 @@ describe('identify_caller tool', () => {
       expect(result.payload['person_key']).toBe('lead:L1');
       expect(result.payload['name']).toBe('Ada');
     }
-    expect(repo.getByRetellCallId(CALL_ID)?.personKey).toBe('lead:L1');
+    expect((await repo.getByRetellCallId(CALL_ID))?.personKey).toBe('lead:L1');
   });
 });
 
 describe('create_lead tool', () => {
   it('creates a lead and associates it with the call', async () => {
-    const repo = seededRepo();
+    const repo = await seededRepo();
     const createLead = vi.fn().mockResolvedValue({ leadId: 'L9', personKey: 'lead:L9' });
     const client = fakeGuidedBoostClient({ createLead });
     const { rawBody, signature } = toolPayload(TOOL.CREATE_LEAD, {
@@ -92,14 +92,14 @@ describe('create_lead tool', () => {
 
     expect(result.status).toBe('ok');
     if (result.status === 'ok') expect(result.payload['created']).toBe(true);
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.leadId).toBe('L9');
     expect(record?.leadCreated).toBe(true);
     expect(createLead).toHaveBeenCalledTimes(1);
   });
 
   it('is duplicate-safe when a lead already exists', async () => {
-    const repo = seededRepo('EXISTING');
+    const repo = await seededRepo('EXISTING');
     const createLead = vi.fn();
     const client = fakeGuidedBoostClient({ createLead });
     const { rawBody, signature } = toolPayload(TOOL.CREATE_LEAD, { name: 'Ada' });
@@ -120,7 +120,7 @@ describe('create_lead tool', () => {
   });
 
   it('degrades gracefully when creation fails', async () => {
-    const repo = seededRepo();
+    const repo = await seededRepo();
     const client = fakeGuidedBoostClient({
       createLead: vi.fn().mockRejectedValue(new Error('gb down')),
     });
@@ -136,11 +136,11 @@ describe('create_lead tool', () => {
 
     expect(result.status).toBe('ok');
     if (result.status === 'ok') expect(result.payload['created']).toBe(false);
-    expect(repo.getByRetellCallId(CALL_ID)?.leadId).toBeUndefined();
+    expect((await repo.getByRetellCallId(CALL_ID))?.leadId).toBeUndefined();
   });
 
   it('captures details locally when the create endpoint is unconfirmed', async () => {
-    const repo = seededRepo();
+    const repo = await seededRepo();
     const client = fakeGuidedBoostClient({
       createLead: vi.fn().mockRejectedValue(new GuidedBoostError('unsupported', 'not confirmed')),
     });
@@ -161,7 +161,7 @@ describe('create_lead tool', () => {
       expect(result.payload['created']).toBe(false);
       expect(result.payload['captured']).toBe(true);
     }
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.collectedInfo.name).toBe('Ada');
     expect(record?.collectedInfo.destination).toBe('Everest');
     expect(record?.leadId).toBeUndefined();
@@ -170,7 +170,7 @@ describe('create_lead tool', () => {
 
 describe('update_lead tool', () => {
   it('captures details locally when the update endpoint is unconfirmed', async () => {
-    const repo = seededRepo('L1');
+    const repo = await seededRepo('L1');
     const client = fakeGuidedBoostClient({
       updateLead: vi.fn().mockRejectedValue(new GuidedBoostError('unsupported', 'not confirmed')),
     });
@@ -188,7 +188,7 @@ describe('update_lead tool', () => {
       expect(result.payload['updated']).toBe(false);
       expect(result.payload['captured']).toBe(true);
     }
-    expect(repo.getByRetellCallId(CALL_ID)?.collectedInfo.budget).toBe('5000 USD');
+    expect((await repo.getByRetellCallId(CALL_ID))?.collectedInfo.budget).toBe('5000 USD');
   });
 });
 
@@ -196,7 +196,7 @@ describe('book_consultation tool', () => {
   const SLOT = '2026-11-20T09:30:00.000Z';
 
   it('books when the backend confirms (booked === true)', async () => {
-    const repo = seededRepo('L1');
+    const repo = await seededRepo('L1');
     const client = fakeGuidedBoostClient({
       getTeamSlots: vi.fn().mockResolvedValue({ slots: [{ starts_at: SLOT }], mode: 'pool' }),
       bookTeamAppointment: vi.fn().mockResolvedValue({
@@ -226,13 +226,13 @@ describe('book_consultation tool', () => {
       expect(result.payload['booked']).toBe(true);
       expect(result.payload['appointment_id']).toBe('A1');
     }
-    const record = repo.getByRetellCallId(CALL_ID);
+    const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.bookingStatus).toBe(BookingStatus.CONFIRMED);
     expect(record?.outcome).toBe(CallOutcome.BOOKED);
   });
 
   it('does not book when the chosen slot is no longer available (booked === false)', async () => {
-    const repo = seededRepo('L1');
+    const repo = await seededRepo('L1');
     const bookTeamAppointment = vi.fn();
     const client = fakeGuidedBoostClient({
       getTeamSlots: vi
@@ -257,11 +257,11 @@ describe('book_consultation tool', () => {
 
     if (result.status === 'ok') expect(result.payload['booked']).toBe(false);
     expect(bookTeamAppointment).not.toHaveBeenCalled();
-    expect(repo.getByRetellCallId(CALL_ID)?.bookingStatus).toBe(BookingStatus.FAILED);
+    expect((await repo.getByRetellCallId(CALL_ID))?.bookingStatus).toBe(BookingStatus.FAILED);
   });
 
   it('does not claim success when the backend omits an appointment id', async () => {
-    const repo = seededRepo('L1');
+    const repo = await seededRepo('L1');
     const client = fakeGuidedBoostClient({
       getTeamSlots: vi.fn().mockResolvedValue({ slots: [{ starts_at: SLOT }], mode: 'pool' }),
       bookTeamAppointment: vi
@@ -284,11 +284,11 @@ describe('book_consultation tool', () => {
     });
 
     if (result.status === 'ok') expect(result.payload['booked']).toBe(false);
-    expect(repo.getByRetellCallId(CALL_ID)?.bookingStatus).toBe(BookingStatus.FAILED);
+    expect((await repo.getByRetellCallId(CALL_ID))?.bookingStatus).toBe(BookingStatus.FAILED);
   });
 
   it('rejects an invalid meeting_type', async () => {
-    const repo = seededRepo('L1');
+    const repo = await seededRepo('L1');
     const getTeamSlots = vi.fn();
     const client = fakeGuidedBoostClient({ getTeamSlots });
     const { rawBody, signature } = toolPayload(TOOL.BOOK_CONSULTATION, {
@@ -311,7 +311,7 @@ describe('book_consultation tool', () => {
   });
 
   it('refuses to book before a lead exists', async () => {
-    const repo = seededRepo();
+    const repo = await seededRepo();
     const getTeamSlots = vi.fn();
     const client = fakeGuidedBoostClient({ getTeamSlots });
     const { rawBody, signature } = toolPayload(TOOL.BOOK_CONSULTATION, {

@@ -101,14 +101,14 @@ export async function processToolRequest(input: ToolRequestInput): Promise<ToolR
 
   // Bind the call SERVER-SIDE (create the record if the tool fired before the
   // call_started webhook was processed — ordering is not guaranteed).
-  const record = repo.createOrGetInbound({
+  const record = await repo.createOrGetInbound({
     retellCallId: request.call.call_id,
     agentId: request.call.agent_id ?? undefined,
     inboundNumber: request.call.to_number ?? undefined,
     callerNumber: request.call.from_number ?? undefined,
   });
 
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.TOOL_CALLED, { tool: name });
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.TOOL_CALLED, { tool: name });
   logger.info({ retellCallId: record.retellCallId, tool: name }, 'inbound tool called');
 
   const client = input.client;
@@ -181,19 +181,19 @@ async function identifyCallerTool(
   if (identity.personKey) patch.personKey = identity.personKey;
   if (identity.salesAgentName) patch.ownerName = identity.salesAgentName;
   if (identity.salesAgentEmail) patch.ownerEmail = identity.salesAgentEmail;
-  repo.update(record.retellCallId, patch);
-  if (identity.name) repo.mergeCollectedInfo(record.retellCallId, { name: identity.name });
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.CALLER_IDENTIFIED, {
+  await repo.update(record.retellCallId, patch);
+  if (identity.name) await repo.mergeCollectedInfo(record.retellCallId, { name: identity.name });
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.CALLER_IDENTIFIED, {
     callerType: identity.callerType,
     matched: known,
   });
 
   if (!known) {
-    repo.recordLifecycle(record.retellCallId, LifecycleEvent.NEW_CALLER, {});
+    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.NEW_CALLER, {});
     return { known: false, caller_type: identity.callerType };
   }
 
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_CALLER, {});
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_CALLER, {});
 
   // Existing caller: resolve personKey -> leadId + detect an existing consultation
   // + current owner, using the verified persons endpoint. Preserves identity on any
@@ -209,24 +209,24 @@ async function identifyCallerTool(
     if (resolved.hasExistingConsultation) resPatch.hasExistingConsultation = true;
     if (resolved.ownerName) resPatch.ownerName = resolved.ownerName;
     if (resolved.ownerEmail) resPatch.ownerEmail = resolved.ownerEmail;
-    repo.update(record.retellCallId, resPatch);
+    await repo.update(record.retellCallId, resPatch);
 
     if (resolved.leadId) {
-      repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLVED, {
+      await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLVED, {
         leadId: resolved.leadId,
       });
     } else if (resolved.reachable) {
-      repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
+      await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
         reason: 'no_lead_for_person',
       });
     } else {
-      repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
+      await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
         reason: 'unreachable',
       });
     }
   }
 
-  const current = repo.getByRetellCallId(record.retellCallId);
+  const current = await repo.getByRetellCallId(record.retellCallId);
   return {
     known: true,
     caller_type: identity.callerType,
@@ -285,7 +285,7 @@ async function createLeadTool(
 
   // Always retain what the caller told us on the local call record, even if
   // Guided Boost cannot persist it — it still reaches the CRM in the end-of-call note.
-  repo.mergeCollectedInfo(record.retellCallId, collectedFrom(data));
+  await repo.mergeCollectedInfo(record.retellCallId, collectedFrom(data));
 
   // Avoid duplicate creation within the same call.
   if (record.leadId) {
@@ -320,8 +320,8 @@ async function createLeadTool(
       leadCreated: true,
     };
     if (created.personKey) patch.personKey = created.personKey;
-    repo.update(record.retellCallId, patch);
-    repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_CREATED, {
+    await repo.update(record.retellCallId, patch);
+    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_CREATED, {
       leadId: created.leadId,
     });
     return { created: true, lead_id: created.leadId };
@@ -355,7 +355,7 @@ async function updateLeadTool(
   }
 
   // Always keep the locally-collected info, even if Guided Boost is unavailable.
-  repo.mergeCollectedInfo(record.retellCallId, collectedFrom(args.data));
+  await repo.mergeCollectedInfo(record.retellCallId, collectedFrom(args.data));
 
   const gb = gbClient(client);
   if (!gb) return { updated: false, error: 'Lead update is unavailable right now.' };
@@ -412,18 +412,18 @@ async function addCallNoteTool(
   }
 }
 
-function updateCallOutcomeTool(
+async function updateCallOutcomeTool(
   rawArgs: Record<string, unknown>,
   record: CallRecord,
   repo: CallRepository,
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const args = updateCallOutcomeArgsSchema.safeParse(rawArgs);
   if (!args.success) return { recorded: false, error: 'An outcome is required.' };
 
   const outcome = normalizeOutcome(args.data.outcome);
   const patch: Parameters<CallRepository['update']>[1] = { outcome };
   if (args.data.summary) patch.summary = args.data.summary;
-  repo.update(record.retellCallId, patch);
+  await repo.update(record.retellCallId, patch);
   return { recorded: true, outcome };
 }
 
@@ -448,7 +448,7 @@ async function getSlotsTool(
   }
 
   const tz = normalizeTimezone(args.data.timezone);
-  if (tz) repo.mergeCollectedInfo(record.retellCallId, { timezone: tz });
+  if (tz) await repo.mergeCollectedInfo(record.retellCallId, { timezone: tz });
 
   const result = await getAvailableSlots(
     {
@@ -492,12 +492,12 @@ async function bookTool(
     };
   }
 
-  repo.update(record.retellCallId, {
+  await repo.update(record.retellCallId, {
     bookingStatus: BookingStatus.ATTEMPTED,
     consultationRequested: true,
   });
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_REQUESTED, {});
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_ATTEMPTED, {
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_REQUESTED, {});
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_ATTEMPTED, {
     meetingType: args.data.meeting_type,
   });
 
@@ -516,18 +516,18 @@ async function bookTool(
   );
 
   if (result.booked) {
-    repo.update(record.retellCallId, {
+    await repo.update(record.retellCallId, {
       bookingStatus: BookingStatus.CONFIRMED,
       appointmentId: result.appointment_id,
       outcome: CallOutcome.BOOKED,
     });
-    repo.mergeCollectedInfo(record.retellCallId, {
+    await repo.mergeCollectedInfo(record.retellCallId, {
       consultationPreference: args.data.meeting_type,
     });
-    repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_CONFIRMED, {
+    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_CONFIRMED, {
       appointmentId: result.appointment_id,
     });
-    repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_BOOKED, {
+    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_BOOKED, {
       appointmentId: result.appointment_id,
     });
     return { ...result };
@@ -535,12 +535,12 @@ async function bookTool(
 
   // Not booked: record WHY, so the agent can fall back to capturing the inquiry
   // (submit_inquiry) without losing the request. Never reports success.
-  repo.update(record.retellCallId, {
+  await repo.update(record.retellCallId, {
     bookingStatus: BookingStatus.FAILED,
     bookingFailureReason: result.reason.slice(0, 200),
   });
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_FAILED, {});
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_NOT_BOOKED, {});
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.BOOKING_FAILED, {});
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.CONSULTATION_NOT_BOOKED, {});
   return { ...result };
 }
 
@@ -564,11 +564,11 @@ async function submitInquiryTool(
   // Always retain everything on the local record first — never lose the inquiry.
   const collected = collectedFrom(data);
   if (data.inquiry) collected['inquiry'] = data.inquiry;
-  repo.mergeCollectedInfo(record.retellCallId, collected);
+  await repo.mergeCollectedInfo(record.retellCallId, collected);
 
   const patch: Parameters<CallRepository['update']>[1] = {};
   if (data.consultation_requested === true) patch.consultationRequested = true;
-  if (Object.keys(patch).length > 0) repo.update(record.retellCallId, patch);
+  if (Object.keys(patch).length > 0) await repo.update(record.retellCallId, patch);
 
   const result = await submitInquiry(record.retellCallId, repo, client ? { client } : {});
 
@@ -601,18 +601,18 @@ async function logIssueTool(
   const { issue } = args.data;
   const urgent = args.data.urgency === 'urgent';
 
-  repo.mergeCollectedInfo(record.retellCallId, { inquiry: issue });
+  await repo.mergeCollectedInfo(record.retellCallId, { inquiry: issue });
   const patch: Parameters<CallRepository['update']>[1] = {
     urgency: urgent ? Urgency.URGENT : Urgency.NORMAL,
   };
   if (args.data.request_existing_consultant === true) patch.requestedExistingConsultant = true;
-  repo.update(record.retellCallId, patch);
+  await repo.update(record.retellCallId, patch);
 
   if (!record.leadId) {
     // Known caller whose lead could not be resolved: keep it locally, do not create
     // a duplicate lead. It still reaches the CRM in the end-of-call note if a lead
     // appears; otherwise it is captured for follow-up.
-    repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, {
+    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, {
       urgent,
       persisted: 'local_only',
     });
@@ -634,7 +634,7 @@ async function logIssueTool(
           ownerEmail: record.ownerEmail,
         })
       : { escalated: false, via: 'none' as const };
-    repo.recordLifecycle(record.retellCallId, LifecycleEvent.URGENT_ESCALATION, {
+    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.URGENT_ESCALATION, {
       escalated: outcome.escalated,
       via: outcome.via,
     });
@@ -648,7 +648,7 @@ async function logIssueTool(
 
   // Normal issue: a CRM note on the lead, preserving the owner relationship.
   const gb = gbClient(client);
-  repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, { urgent: false });
+  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, { urgent: false });
   if (!gb) return { logged: true, persisted: 'local', message: 'I’ve noted your issue.' };
 
   const noteLines = [`Inbound call — caller issue: ${issue}`];
