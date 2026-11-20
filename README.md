@@ -180,29 +180,25 @@ they call. It does not create or modify agents from code.
 The first version stores call records **in process memory** (`callRepository`),
 behind a small interface so it can be swapped for a durable store (Postgres/Prisma,
 mirroring CallScheduler's `CallRecord`) without changing callers. State does not
-survive a restart or span instances — acceptable for a single-instance first version
-and the initial live test; durability is a documented follow-up.
+live during a call in memory, but the authoritative record is now persisted to
+Neon/Postgres (see Persistence), so it survives restarts and spans runs.
 
 ## Known follow-ups
 
-- Durable persistence (above) and a durable CRM-note retry queue (a failed end-of-call
-  note is currently recorded locally, not auto-retried).
-- **Phone→caller lookup** is **verified** against the live API (2026-11-17):
-  `GET /api/crm/search?q=<E.164>` returns `{ results, persons }` where a match is a
-  person-centric record `{ personKey, name, email, phone, salesAgent, leadStatus,
-matchedIn, … }` (keyed by `personKey`, **not** a lead id). The client accepts a
-  result only when its `phone`/`whatsapp` matches the caller's E.164, so an
-  unexpected shape yields "unknown caller", never a misidentification.
-- **personKey → leadId is implemented** (verified live 2026-11-18): `identify_caller`
-  resolves an existing caller via `GET /api/crm/persons/:personKey`, whose `leads[]`
-  wrap the lead columns under `current`/`captured` (lead id in `current.id`). It picks
-  the most recently updated non-deleted lead and also reads `appointments[]` to detect
-  an existing consultation (so no duplicate is booked). Resolution never throws — on
-  failure the caller stays identified with no lead id (no duplicate lead).
-- **New-lead API** (for a captured inquiry → lead) is a clean, configuration-driven
-  boundary (`createLeadFromInboundInquiry`): OFF until `GUIDED_BOOST_NEW_LEAD_ENABLED=true`
-  and `GUIDED_BOOST_NEW_LEAD_PATH` are set, so nothing is POSTed to an unconfirmed path.
-  Set both when David provides the endpoint — no code change needed.
+- A durable CRM-note retry queue (a failed end-of-call note is recorded locally and in
+  Neon, but not auto-retried yet).
+
+### Guided Boost inbound caller APIs (implemented — the authoritative integration)
+
+- `POST /api/caller/inbound/identify` (`identifyInboundCaller`) — one call returns
+  known/new, phone-verification, owner, newest lead, booking/consultation state and a
+  (non-amount) payment summary. Drives `identify_caller`.
+- `POST /api/caller/inbound/inquiries` (`submitInboundInquiry`) — captures a new
+  inquiry or an existing guest's question; retry-safe (the API dedups within 30
+  minutes). Drives `submit_inquiry`.
+- `POST /api/caller/inbound/issues` (`submitInboundIssue`) — logs an existing guest's
+  issue to their lead and alerts the owner (admins too when urgent, or when there is no
+  owner); **single-shot** (it sends email, so it is never retried). Drives `log_issue`.
 - **Lead create / update have no confirmed Guided Boost endpoint.** They are gated
   off (`LEAD_WRITE_ENDPOINTS_CONFIRMED = false` in `guidedBoost/client.ts`): the client
   raises `unsupported` without firing a request, the tools return a graceful
