@@ -13,11 +13,12 @@ import {
   extractSearchResults,
   extractSlots,
   inboundIdentifyResponseSchema,
+  inboundInquiryResponseSchema,
   leadDetailSchema,
-  newLeadResponseSchema,
   personHistorySchema,
   teamAppointmentResponseSchema,
   type InboundIdentifyResponse,
+  type InboundInquiryResponse,
   type LeadDetail,
   type PersonHistory,
   type SearchResult,
@@ -68,6 +69,33 @@ const SEARCH_PATH = '/api/crm/search';
 
 /** Authoritative inbound caller identification (Guided Boost "WHO IS RINGING"). */
 const INBOUND_IDENTIFY_PATH = '/api/caller/inbound/identify';
+
+/** Inbound new-inquiry capture (Guided Boost "A NEW INQUIRY"). */
+const INBOUND_INQUIRY_PATH = '/api/caller/inbound/inquiries';
+
+/** Consultation status sent on an inbound inquiry. */
+export type ConsultationStatus = 'not_requested' | 'requested' | 'booking_failed' | 'booked';
+
+export interface SubmitInboundInquiryInput {
+  brand: string;
+  name?: string;
+  phone?: string | null;
+  email?: string | null;
+  destination?: string;
+  travelDates?: string;
+  travelers?: number;
+  budget?: string;
+  preferences?: string;
+  notes?: string;
+  consultationStatus?: ConsultationStatus;
+  timeZone?: string;
+  summary?: string;
+  transcript?: string;
+  recordingUrl?: string;
+  callId?: string;
+  startedAt?: string;
+  endedAt?: string;
+}
 
 /**
  * Whether Guided Boost's lead create/update endpoints are confirmed. FALSE until
@@ -325,24 +353,65 @@ export class GuidedBoostClient {
   }
 
   /**
-   * NEW inbound-lead API (David's forthcoming endpoint). Turns a captured inbound
-   * inquiry into a Guided Boost lead. The PATH is configuration-driven and the
-   * feature is OFF unless both `newLeadEnabled` is true and `newLeadPath` is set, so
-   * nothing is ever POSTed to an unconfirmed path — it raises `unsupported` instead.
-   * Single-shot write. Returns the created lead id when the response carries one.
+   * Submits an inbound inquiry — `POST /api/caller/inbound/inquiries` (Guided Boost
+   * "A NEW INQUIRY", API 2). Creates a lead (or updates the one a recent identical
+   * inquiry created within 30 minutes — the API's own idempotency), and also serves
+   * an existing guest's new question (put into `notes`).
+   *
+   * `brand` is required and at least one of `phone`/`email`; all other fields are
+   * sent only when available (empty values are omitted). `source` is always
+   * `inbound_ai_caller`. Safe to retry (David's 30-minute dedup), so it is retried
+   * on transient failures. Sends `X-Lead-API-Key` + the `X-Agent-Email`/`X-Agent-Name`
+   * write identity; the key is never logged. Throws `GuidedBoostError` on a
+   * permanent failure or a malformed response.
    */
-  async createLeadFromInboundInquiry(
-    payload: Record<string, unknown>,
-  ): Promise<{ leadId: string | null }> {
-    if (!this.config.newLeadEnabled || !this.config.newLeadPath) {
-      throw new GuidedBoostError('unsupported', 'new-lead API is not configured', {
-        path: '/new-lead',
+  async submitInboundInquiry(input: SubmitInboundInquiryInput): Promise<InboundInquiryResponse> {
+    const brand = input.brand.trim();
+    if (!brand) {
+      throw new GuidedBoostError('client', 'brand is required to submit an inquiry', {
+        path: INBOUND_INQUIRY_PATH,
       });
     }
-    const result = await this.write('POST', this.config.newLeadPath, payload);
-    const parsed = newLeadResponseSchema.safeParse(result);
-    const leadId = parsed.success ? (parsed.data.id ?? parsed.data.lead_id ?? null) : null;
-    return { leadId };
+    const phone = input.phone ?? null;
+    const email = input.email ?? null;
+    if (!phone && !email) {
+      throw new GuidedBoostError('client', 'phone or email is required to submit an inquiry', {
+        path: INBOUND_INQUIRY_PATH,
+      });
+    }
+
+    // Required + identity fields. phone/email are sent as null when absent (the API
+    // contract); every other optional field is OMITTED unless it has a real value.
+    const body: Record<string, unknown> = { brand, source: 'inbound_ai_caller', phone, email };
+    const put = (key: string, value: string | undefined): void => {
+      if (value !== undefined && value.length > 0) body[key] = value;
+    };
+    put('name', input.name);
+    put('destination', input.destination);
+    put('travel_dates', input.travelDates);
+    if (typeof input.travelers === 'number' && Number.isFinite(input.travelers)) {
+      body['travelers'] = input.travelers;
+    }
+    put('budget', input.budget);
+    put('preferences', input.preferences);
+    put('notes', input.notes);
+    put('consultation_status', input.consultationStatus);
+    put('time_zone', input.timeZone);
+    put('summary', input.summary);
+    put('transcript', input.transcript);
+    put('recording_url', input.recordingUrl);
+    put('call_id', input.callId);
+    put('started_at', input.startedAt);
+    put('ended_at', input.endedAt);
+
+    const payload = await this.postJsonRetried(INBOUND_INQUIRY_PATH, body);
+    const parsed = inboundInquiryResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new GuidedBoostError('contract', 'inbound inquiry response did not match the shape', {
+        path: INBOUND_INQUIRY_PATH,
+      });
+    }
+    return parsed.data;
   }
 
   /** CONFIRMED. `POST /api/crm/leads/:id/notes` with `{ kind: 'call', note }`. */

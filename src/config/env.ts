@@ -148,23 +148,6 @@ const envSchema = z.object({
   /** Retry budget for a single safe request. 0 disables retries entirely. */
   GUIDED_BOOST_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(3),
 
-  /**
-   * NEW inbound-lead API (David's forthcoming endpoint for turning a captured
-   * inbound inquiry into a Guided Boost lead). The PATH is configurable so the real
-   * endpoint can be plugged in the instant it is provided — no code change needed.
-   * The feature stays OFF until both the flag is true and a path is set, so nothing
-   * is ever POSTed to an unconfirmed path. Relative to `GUIDED_BOOST_BASE_URL`.
-   */
-  GUIDED_BOOST_NEW_LEAD_ENABLED: z
-    .preprocess(
-      (v) => (typeof v === 'string' ? v.trim().toLowerCase() : v),
-      z.enum(['true', 'false']).default('false'),
-    )
-    .transform((v) => v === 'true'),
-
-  /** Path for the new-lead API (e.g. `/api/crm/inbound-leads`). Empty = not set. */
-  GUIDED_BOOST_NEW_LEAD_PATH: optionalString(),
-
   // -------------------------------------------------------------------------
   // Persistence (Neon / Postgres). OPTIONAL: when unset the service uses the
   // in-memory call store (local dev / tests). When set, the Postgres-backed
@@ -239,9 +222,6 @@ export interface GuidedBoostConfig {
   agentName: string;
   timeoutMs: number;
   maxRetries: number;
-  /** New-lead API: enabled only when the flag is true AND a path is configured. */
-  newLeadEnabled: boolean;
-  newLeadPath: string | undefined;
 }
 
 /**
@@ -262,8 +242,6 @@ export function requireGuidedBoostConfig(source: Env = env): GuidedBoostConfig {
     agentName: source.GUIDED_BOOST_AGENT_NAME,
     timeoutMs: source.GUIDED_BOOST_TIMEOUT_MS,
     maxRetries: source.GUIDED_BOOST_MAX_RETRIES,
-    newLeadEnabled: source.GUIDED_BOOST_NEW_LEAD_ENABLED,
-    newLeadPath: source.GUIDED_BOOST_NEW_LEAD_PATH,
   };
 }
 

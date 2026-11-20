@@ -6,7 +6,6 @@ import {
 } from '../repositories/callRepository.js';
 import { BookingStatus, InquiryStatus, LifecycleEvent, Urgency } from '../domain/call.js';
 import { TOOL } from '../integrations/retell/functionSchemas.js';
-import { GuidedBoostError } from '../integrations/guidedBoost/errors.js';
 import type { EscalationService } from './escalation.service.js';
 import { fakeGuidedBoostClient, signedPayload, TEST_API_KEY } from '../testing/helpers.js';
 
@@ -49,13 +48,18 @@ describe('new caller flow', () => {
     expect(await events(repo)).toContain(LifecycleEvent.NEW_CALLER);
   });
 
-  it('captures the inquiry when the caller does not want a consultant (API pending)', async () => {
+  it('sends a NEW inquiry with consultation_status not_requested and links the lead', async () => {
     const repo = await seeded();
-    const client = fakeGuidedBoostClient({
-      createLeadFromInboundInquiry: vi
-        .fn()
-        .mockRejectedValue(new GuidedBoostError('unsupported', 'not configured')),
+    const submitInboundInquiry = vi.fn().mockResolvedValue({
+      ok: true,
+      lead_id: 'NL1',
+      person_key: 'lead:P1',
+      person_id: 'p9',
+      created: true,
+      known_person: false,
+      owner: { name: 'Grace', email: 'grace@x.com' },
     });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
     const result = await run(
       TOOL.SUBMIT_INQUIRY,
       {
@@ -66,42 +70,60 @@ describe('new caller flow', () => {
       },
       { repo, client },
     );
-    if (result.status === 'ok') {
-      expect(result.payload['captured']).toBe(true);
-      expect(result.payload['outcome']).toBe('captured');
-    }
-    const record = (await repo.getByRetellCallId(CALL_ID));
-    expect(record?.inquiryStatus).toBe(InquiryStatus.CAPTURED);
-    expect(record?.collectedInfo.destination).toBe('Everest');
-    expect(record?.collectedInfo.inquiry).toContain('Everest');
-    expect(await events(repo)).toContain(LifecycleEvent.LEAD_CAPTURED);
-  });
 
-  it('sends the inquiry to the new-lead API when configured', async () => {
-    const repo = await seeded();
-    const client = fakeGuidedBoostClient({
-      createLeadFromInboundInquiry: vi.fn().mockResolvedValue({ leadId: 'NL1' }),
-    });
-    const result = await run(
-      TOOL.SUBMIT_INQUIRY,
-      { name: 'Ada', inquiry: 'Trip' },
-      { repo, client },
-    );
     if (result.status === 'ok') {
       expect(result.payload['outcome']).toBe('sent');
       expect(result.payload['lead_id']).toBe('NL1');
     }
-    expect((await repo.getByRetellCallId(CALL_ID))?.inquiryStatus).toBe(InquiryStatus.SENT);
+    // Correct brand + consultation_status + caller phone/email + question in notes.
+    expect(submitInboundInquiry).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brand: 'HW',
+        consultationStatus: 'not_requested',
+        phone: '+12318310814',
+        email: 'ada@x.com',
+        name: 'Ada',
+        destination: 'Everest',
+        callId: CALL_ID,
+      }),
+    );
+    expect((submitInboundInquiry.mock.calls[0]?.[0] as { notes?: string })?.notes).toContain(
+      'Everest Base Camp',
+    );
+
+    // Persisted + linked to the inbound call record.
+    const record = (await repo.getByRetellCallId(CALL_ID));
+    expect(record?.inquiryStatus).toBe(InquiryStatus.SENT);
+    expect(record?.leadId).toBe('NL1');
+    expect(record?.leadCreated).toBe(true);
+    expect(record?.personKey).toBe('lead:P1');
+    expect(record?.ownerName).toBe('Grace');
+    expect(await events(repo)).toContain(LifecycleEvent.LEAD_CAPTURED);
   });
 
-  it('wants a consultant but booking fails → inquiry captured (not a failure)', async () => {
+  it('sends consultation_status requested when the caller asked for a consultant', async () => {
+    const repo = await seeded();
+    const submitInboundInquiry = vi.fn().mockResolvedValue({ ok: true, created: true });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
+    await run(
+      TOOL.SUBMIT_INQUIRY,
+      { inquiry: 'I would like to speak with someone', consultation_requested: true },
+      { repo, client },
+    );
+    expect(submitInboundInquiry).toHaveBeenCalledWith(
+      expect.objectContaining({ consultationStatus: 'requested' }),
+    );
+  });
+
+  it('sends consultation_status booking_failed after a failed booking', async () => {
     const repo = await seeded('L1');
+    const submitInboundInquiry = vi.fn().mockResolvedValue({ ok: true, lead_id: 'L1', created: false });
     const client = fakeGuidedBoostClient({
       // chosen slot not in the returned set → booking refused
       getTeamSlots: vi
         .fn()
         .mockResolvedValue({ slots: [{ starts_at: '2026-12-01T10:00:00.000Z' }], mode: 'pool' }),
-      createLeadFromInboundInquiry: vi.fn().mockResolvedValue({ leadId: 'NL2' }),
+      submitInboundInquiry,
     });
 
     const book = await run(
@@ -115,27 +137,108 @@ describe('new caller flow', () => {
       { repo, client },
     );
     if (book.status === 'ok') expect(book.payload['booked']).toBe(false);
-    const afterBook = (await repo.getByRetellCallId(CALL_ID));
-    expect(afterBook?.bookingStatus).toBe(BookingStatus.FAILED);
-    expect(afterBook?.bookingFailureReason).toBeTruthy();
-    expect(await events(repo)).toContain(LifecycleEvent.CONSULTATION_NOT_BOOKED);
+    expect((await repo.getByRetellCallId(CALL_ID))?.bookingStatus).toBe(BookingStatus.FAILED);
 
-    const inquiry = await run(
-      TOOL.SUBMIT_INQUIRY,
-      { booking_failed: true, inquiry: 'Everest' },
-      { repo, client },
-    );
+    const inquiry = await run(TOOL.SUBMIT_INQUIRY, { booking_failed: true, inquiry: 'Everest' }, { repo, client });
     if (inquiry.status === 'ok') expect(inquiry.payload['outcome']).toBe('sent');
+    expect(submitInboundInquiry).toHaveBeenCalledWith(
+      expect.objectContaining({ consultationStatus: 'booking_failed' }),
+    );
+    // The booking-failure context is folded into notes for the human.
+    expect((submitInboundInquiry.mock.calls[0]?.[0] as { notes?: string })?.notes).toContain(
+      'booking could not be completed',
+    );
   });
 
-  it('missing optional info does not break inquiry capture', async () => {
-    const repo = await seeded();
-    const client = fakeGuidedBoostClient({
-      createLeadFromInboundInquiry: vi.fn().mockResolvedValue({ leadId: null }),
+  it('sends consultation_status booked when a consultation was booked', async () => {
+    const repo = await seeded('L1');
+    await repo.update(CALL_ID, { bookingStatus: BookingStatus.CONFIRMED });
+    const submitInboundInquiry = vi.fn().mockResolvedValue({ ok: true, created: false });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
+    await run(TOOL.SUBMIT_INQUIRY, { inquiry: 'Looking forward to it' }, { repo, client });
+    expect(submitInboundInquiry).toHaveBeenCalledWith(
+      expect.objectContaining({ consultationStatus: 'booked' }),
+    );
+  });
+
+  it('an existing guest can submit a new question via submit_inquiry (goes to notes)', async () => {
+    const repo = await seeded('L5');
+    const submitInboundInquiry = vi.fn().mockResolvedValue({
+      ok: true,
+      lead_id: 'L5',
+      created: false,
+      owner: { name: 'Grace', email: 'grace@x.com' },
     });
-    const result = await run(TOOL.SUBMIT_INQUIRY, {}, { repo, client });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
+    const result = await run(
+      TOOL.SUBMIT_INQUIRY,
+      { inquiry: 'Question about my baggage allowance' },
+      { repo, client },
+    );
+    if (result.status === 'ok') expect(result.payload['outcome']).toBe('sent');
+    expect((submitInboundInquiry.mock.calls[0]?.[0] as { notes?: string })?.notes).toContain(
+      'baggage allowance',
+    );
+  });
+
+  it('treats created:false as a successful idempotent outcome (no second local lead)', async () => {
+    const repo = await seeded();
+    const submitInboundInquiry = vi
+      .fn()
+      .mockResolvedValue({ ok: true, lead_id: 'L1', created: false, known_person: true });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
+    const result = await run(TOOL.SUBMIT_INQUIRY, { inquiry: 'Trip' }, { repo, client });
+
+    if (result.status === 'ok') expect(result.payload['outcome']).toBe('sent');
+    const record = (await repo.getByRetellCallId(CALL_ID));
+    expect(record?.inquiryStatus).toBe(InquiryStatus.SENT);
+    expect(record?.leadId).toBe('L1');
+    expect(record?.leadCreated).toBe(false);
+  });
+
+  it('submits with a valid email when no phone is available', async () => {
+    const repo = createInMemoryCallRepository();
+    await repo.createOrGetInbound({ retellCallId: CALL_ID }); // no caller number
+    const submitInboundInquiry = vi.fn().mockResolvedValue({ ok: true, created: true });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
+    // A tool payload WITHOUT from_number, so the call record has no phone.
+    const { rawBody, signature } = signedPayload(
+      { call: { call_id: CALL_ID }, name: TOOL.SUBMIT_INQUIRY, args: { email: 'ada@x.com', inquiry: 'Trip' } },
+      TEST_API_KEY,
+    );
+    const result = await processToolRequest({ rawBody, signature, apiKey: TEST_API_KEY, repo, client });
+
+    if (result.status === 'ok') expect(result.payload['outcome']).toBe('sent');
+    expect(submitInboundInquiry).toHaveBeenCalledWith(
+      expect.objectContaining({ phone: null, email: 'ada@x.com' }),
+    );
+  });
+
+  it('preserves the inquiry locally when Guided Boost fails (call still completes)', async () => {
+    const repo = await seeded();
+    const submitInboundInquiry = vi.fn().mockRejectedValue(new Error('gb down'));
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
+    const result = await run(TOOL.SUBMIT_INQUIRY, { inquiry: 'Everest' }, { repo, client });
+
+    expect(result.status).toBe('ok'); // the call is not failed
+    if (result.status === 'ok') {
+      expect(result.payload['captured']).toBe(true);
+      expect(result.payload['outcome']).toBe('failed');
+    }
+    const record = (await repo.getByRetellCallId(CALL_ID));
+    expect(record?.inquiryStatus).toBe(InquiryStatus.FAILED);
+    expect((record?.errors.length ?? 0)).toBeGreaterThan(0);
+    expect(await events(repo)).toContain(LifecycleEvent.CRM_UPDATE_FAILED);
+  });
+
+  it('missing optional info does not break inquiry submission', async () => {
+    const repo = await seeded();
+    const result = await run(TOOL.SUBMIT_INQUIRY, {}, { repo, client: fakeGuidedBoostClient() });
     expect(result.status).toBe('ok');
-    if (result.status === 'ok') expect(result.payload['captured']).toBe(true);
+    if (result.status === 'ok') {
+      expect(result.payload['captured']).toBe(true);
+      expect(result.payload['outcome']).toBe('sent');
+    }
   });
 });
 

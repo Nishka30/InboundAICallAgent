@@ -353,17 +353,29 @@ export const createLeadResponseSchema = z
   .passthrough();
 
 /**
- * Response for the NEW-lead-from-inbound-inquiry API (David's forthcoming
- * endpoint). Permissive: we read an id and an ok flag if present, tolerate the rest.
+ * `POST /api/caller/inbound/inquiries` — the new-inquiry API (Guided Boost "A NEW
+ * INQUIRY", API 2) response. `created: true` (201) → a new lead was created;
+ * `created: false` (200) → an identical/recent inquiry already created a lead
+ * within 30 minutes and it was updated (a SUCCESSFUL, idempotent outcome).
+ * Permissive + passthrough; every field nullish.
  */
-export const newLeadResponseSchema = z
+export const inboundInquiryResponseSchema = z
   .object({
-    id: idString.nullish(),
-    lead_id: idString.nullish(),
-    person_key: z.string().nullish(),
     ok: z.boolean().nullish(),
+    lead_id: idString.nullish(),
+    person_id: idString.nullish(),
+    person_key: z.string().nullish(),
+    created: z.boolean().nullish(),
+    known_person: z.boolean().nullish(),
+    owner: z
+      .object({ name: z.string().nullish(), email: z.string().nullish() })
+      .passthrough()
+      .nullish(),
+    brand: z.string().nullish(),
   })
   .passthrough();
+
+export type InboundInquiryResponse = z.infer<typeof inboundInquiryResponseSchema>;
 
 /** The `{ "error": "..." }` body Guided Boost returns on failure. */
 export const errorBodySchema = z.object({ error: z.string() }).passthrough();

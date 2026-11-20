@@ -10,8 +10,6 @@ const CONFIG: GuidedBoostConfig = {
   agentName: 'Agent',
   timeoutMs: 5000,
   maxRetries: 0,
-  newLeadEnabled: false,
-  newLeadPath: undefined,
 };
 
 interface FakeResponse {
@@ -154,29 +152,68 @@ describe('unconfirmed write endpoints are not fired', () => {
   });
 });
 
-describe('new-lead API (createLeadFromInboundInquiry)', () => {
-  it('raises unsupported without a network call while unconfigured', async () => {
-    const { impl, calls } = fakeFetch({ body: {} });
-    await expect(client(impl).createLeadFromInboundInquiry({ name: 'Ada' })).rejects.toMatchObject({
-      name: 'GuidedBoostError',
-      kind: 'unsupported',
+describe('submitInboundInquiry (POST /api/caller/inbound/inquiries)', () => {
+  it('POSTs brand/source + write headers and returns the created lead', async () => {
+    const { impl, calls } = fakeFetch({
+      status: 201,
+      body: { ok: true, lead_id: 'NL9', person_key: 'lead:P1', created: true },
     });
-    expect(calls).toHaveLength(0);
-  });
+    const result = await client(impl).submitInboundInquiry({
+      brand: 'HW',
+      phone: '+13035550100',
+      email: null,
+      name: 'Ada',
+      travelers: 2,
+      consultationStatus: 'not_requested',
+      callId: 'call_1',
+    });
 
-  it('POSTs to the configured path with write headers when enabled', async () => {
-    const { impl, calls } = fakeFetch({ status: 200, body: { id: 'NL9' } });
-    const configured = new GuidedBoostClient({
-      config: { ...CONFIG, newLeadEnabled: true, newLeadPath: '/api/crm/inbound-leads' },
-      fetchImpl: impl,
-      sleep: () => Promise.resolve(),
-    });
-    const created = await configured.createLeadFromInboundInquiry({ name: 'Ada', inquiry: 'Trip' });
-    expect(created.leadId).toBe('NL9');
-    expect(calls[0]?.url).toBe('https://gb.test/api/crm/inbound-leads');
+    expect(result.lead_id).toBe('NL9');
+    expect(result.created).toBe(true);
+    expect(calls[0]?.url).toBe('https://gb.test/api/caller/inbound/inquiries');
+    expect(calls[0]?.init?.method).toBe('POST');
+    const body = JSON.parse(calls[0]?.init?.body as string) as Record<string, unknown>;
+    expect(body['brand']).toBe('HW');
+    expect(body['source']).toBe('inbound_ai_caller');
+    expect(body['phone']).toBe('+13035550100');
+    expect(body['email']).toBeNull();
+    expect(body['travelers']).toBe(2);
+    expect(body['consultation_status']).toBe('not_requested');
     const headers = calls[0]?.init?.headers as Record<string, string>;
     expect(headers['X-Lead-API-Key']).toBe('test_lead_key');
     expect(headers['X-Agent-Email']).toBe('agent@test');
+    expect(headers['X-Agent-Name']).toBe('Agent');
+  });
+
+  it('omits empty optional fields (no meaningless empty strings)', async () => {
+    const { impl, calls } = fakeFetch({ status: 200, body: { ok: true, created: false } });
+    await client(impl).submitInboundInquiry({ brand: 'HW', phone: '+13035550100', name: '' });
+    const body = JSON.parse(calls[0]?.init?.body as string) as Record<string, unknown>;
+    expect(body).not.toHaveProperty('name');
+    expect(body).not.toHaveProperty('destination');
+    expect(body['brand']).toBe('HW');
+  });
+
+  it('treats created:false (200) as a success, not an error', async () => {
+    const { impl } = fakeFetch({ status: 200, body: { ok: true, lead_id: 'L1', created: false } });
+    const result = await client(impl).submitInboundInquiry({ brand: 'HW', email: 'ada@x.com' });
+    expect(result.created).toBe(false);
+    expect(result.lead_id).toBe('L1');
+  });
+
+  it('throws a contract error on an invalid (non-object) response', async () => {
+    const { impl } = fakeFetch({ status: 200, body: 'not-an-object' });
+    await expect(
+      client(impl).submitInboundInquiry({ brand: 'HW', phone: '+13035550100' }),
+    ).rejects.toMatchObject({ name: 'GuidedBoostError', kind: 'contract' });
+  });
+
+  it('refuses to call with neither phone nor email', async () => {
+    const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
+    await expect(
+      client(impl).submitInboundInquiry({ brand: 'HW', phone: null, email: null }),
+    ).rejects.toMatchObject({ name: 'GuidedBoostError', kind: 'client' });
+    expect(calls).toHaveLength(0);
   });
 });
 
