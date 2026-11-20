@@ -14,11 +14,13 @@ import {
   extractSlots,
   inboundIdentifyResponseSchema,
   inboundInquiryResponseSchema,
+  inboundIssueResponseSchema,
   leadDetailSchema,
   personHistorySchema,
   teamAppointmentResponseSchema,
   type InboundIdentifyResponse,
   type InboundInquiryResponse,
+  type InboundIssueResponse,
   type LeadDetail,
   type PersonHistory,
   type SearchResult,
@@ -72,6 +74,26 @@ const INBOUND_IDENTIFY_PATH = '/api/caller/inbound/identify';
 
 /** Inbound new-inquiry capture (Guided Boost "A NEW INQUIRY"). */
 const INBOUND_INQUIRY_PATH = '/api/caller/inbound/inquiries';
+
+/** Existing-guest issue capture + alert (Guided Boost "AN ISSUE ON AN EXISTING GUEST"). */
+const INBOUND_ISSUE_PATH = '/api/caller/inbound/issues';
+
+/** The classification of an existing-guest issue. */
+export type IssueKind = 'question' | 'existing_booking' | 'wants_consultant' | 'complaint' | 'other';
+export type IssueUrgency = 'normal' | 'urgent';
+
+export interface SubmitInboundIssueInput {
+  brand: string;
+  issue: string;
+  phone?: string | null;
+  email?: string | null;
+  leadId?: string | null;
+  urgency?: IssueUrgency;
+  kind?: IssueKind;
+  summary?: string;
+  transcript?: string;
+  callId?: string;
+}
 
 /** Consultation status sent on an inbound inquiry. */
 export type ConsultationStatus = 'not_requested' | 'requested' | 'booking_failed' | 'booked';
@@ -409,6 +431,60 @@ export class GuidedBoostClient {
     if (!parsed.success) {
       throw new GuidedBoostError('contract', 'inbound inquiry response did not match the shape', {
         path: INBOUND_INQUIRY_PATH,
+      });
+    }
+    return parsed.data;
+  }
+
+  /**
+   * Submits an existing-guest issue — `POST /api/caller/inbound/issues` (Guided
+   * Boost "AN ISSUE ON AN EXISTING GUEST", API 3). Guided Boost writes the issue to
+   * the guest's lead, emails their assigned agent (admins too when urgent, or when
+   * there is no agent), and creates a lead if the caller had none so the issue is
+   * never lost.
+   *
+   * `brand` and `issue` are required; the guest is identified by `phone`/`email`/
+   * `leadId`. `urgency` defaults to `normal`. Only real values are sent (no empty
+   * strings). This is a SINGLE-SHOT write (not retried), because it sends email and
+   * must not be duplicated. Sends `X-Lead-API-Key` + the `X-Agent-Email`/
+   * `X-Agent-Name` write identity; the key is never logged. Throws `GuidedBoostError`
+   * on a permanent failure or a malformed response.
+   */
+  async submitInboundIssue(input: SubmitInboundIssueInput): Promise<InboundIssueResponse> {
+    const brand = input.brand.trim();
+    if (!brand) {
+      throw new GuidedBoostError('client', 'brand is required to log an issue', {
+        path: INBOUND_ISSUE_PATH,
+      });
+    }
+    const issue = input.issue.trim();
+    if (!issue) {
+      throw new GuidedBoostError('client', 'issue is required to log an issue', {
+        path: INBOUND_ISSUE_PATH,
+      });
+    }
+
+    const body: Record<string, unknown> = {
+      brand,
+      issue,
+      phone: input.phone ?? null,
+      lead_id: input.leadId ?? null,
+      urgency: input.urgency ?? 'normal',
+    };
+    if (input.email) body['email'] = input.email;
+    if (input.kind) body['kind'] = input.kind;
+    const put = (key: string, value: string | undefined): void => {
+      if (value !== undefined && value.length > 0) body[key] = value;
+    };
+    put('summary', input.summary);
+    put('transcript', input.transcript);
+    put('call_id', input.callId);
+
+    const payload = await this.write('POST', INBOUND_ISSUE_PATH, body);
+    const parsed = inboundIssueResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new GuidedBoostError('contract', 'inbound issue response did not match the shape', {
+        path: INBOUND_ISSUE_PATH,
       });
     }
     return parsed.data;

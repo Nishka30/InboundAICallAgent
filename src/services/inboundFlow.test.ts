@@ -6,7 +6,6 @@ import {
 } from '../repositories/callRepository.js';
 import { BookingStatus, InquiryStatus, LifecycleEvent, Urgency } from '../domain/call.js';
 import { TOOL } from '../integrations/retell/functionSchemas.js';
-import type { EscalationService } from './escalation.service.js';
 import { fakeGuidedBoostClient, signedPayload, TEST_API_KEY } from '../testing/helpers.js';
 
 const CALL_ID = 'call_flow_1';
@@ -364,52 +363,125 @@ describe('existing caller flow', () => {
     expect(getTeamSlots).not.toHaveBeenCalled();
   });
 
-  it('logs a simple issue as a CRM note', async () => {
+  it('logs a simple issue (normal question) via the issue API, linked to the lead', async () => {
     const repo = await seeded('L5');
-    const addCallNote = vi.fn().mockResolvedValue(undefined);
-    const client = fakeGuidedBoostClient({ addCallNote });
+    const submitInboundIssue = vi
+      .fn()
+      .mockResolvedValue({ ok: true, lead_id: 'L5', lead_created: false, alert_sent: true });
+    const client = fakeGuidedBoostClient({ submitInboundIssue });
     const result = await run(
       TOOL.LOG_ISSUE,
-      { issue: 'Question about baggage allowance' },
+      { issue: 'Question about my baggage allowance' },
       { repo, client },
     );
     if (result.status === 'ok') expect(result.payload['logged']).toBe(true);
-    expect(addCallNote).toHaveBeenCalledTimes(1);
+    expect(submitInboundIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        brand: 'HW',
+        kind: 'question',
+        urgency: 'normal',
+        issue: 'Question about my baggage allowance',
+        leadId: 'L5',
+        phone: '+12318310814',
+        callId: CALL_ID,
+      }),
+    );
     expect(await events(repo)).toContain(LifecycleEvent.EXISTING_LEAD_ISSUE);
   });
 
-  it('escalates an urgent issue through the escalation service', async () => {
+  it.each([
+    ['existing_booking', 'My booking dates look wrong'],
+    ['complaint', 'I am unhappy with the service'],
+    ['other', 'A general request'],
+  ])('sends kind %s when the agent classifies it', async (kind, issue) => {
     const repo = await seeded('L5');
-    const escalate = vi.fn().mockResolvedValue({ escalated: true, via: 'crm_note' });
-    const escalation: EscalationService = { escalate };
-    const client = fakeGuidedBoostClient();
-    const result = await run(
-      TOOL.LOG_ISSUE,
-      { issue: 'Flight tomorrow was cancelled!', urgency: 'urgent' },
-      { repo, client, escalation },
-    );
-    if (result.status === 'ok') {
-      expect(result.payload['urgent']).toBe(true);
-      expect(result.payload['escalated']).toBe(true);
-    }
-    expect(escalate).toHaveBeenCalledTimes(1);
-    expect((await repo.getByRetellCallId(CALL_ID))?.urgency).toBe(Urgency.URGENT);
-    expect(await events(repo)).toContain(LifecycleEvent.URGENT_ESCALATION);
+    const submitInboundIssue = vi.fn().mockResolvedValue({ ok: true, lead_id: 'L5' });
+    const client = fakeGuidedBoostClient({ submitInboundIssue });
+    await run(TOOL.LOG_ISSUE, { issue, kind }, { repo, client });
+    expect(submitInboundIssue).toHaveBeenCalledWith(expect.objectContaining({ kind }));
   });
 
-  it('records a request for the existing consultant', async () => {
+  it('maps request_existing_consultant to kind wants_consultant', async () => {
     const repo = await seeded('L5');
-    await repo.update(CALL_ID, { ownerName: 'Grace' });
-    const addCallNote = vi.fn().mockResolvedValue(undefined);
-    const client = fakeGuidedBoostClient({ addCallNote });
+    const submitInboundIssue = vi.fn().mockResolvedValue({ ok: true, lead_id: 'L5' });
+    const client = fakeGuidedBoostClient({ submitInboundIssue });
     await run(
       TOOL.LOG_ISSUE,
       { issue: 'Please have my consultant call me', request_existing_consultant: true },
       { repo, client },
     );
     expect((await repo.getByRetellCallId(CALL_ID))?.requestedExistingConsultant).toBe(true);
-    const note = (addCallNote.mock.calls[0]?.[1] ?? '') as string;
-    expect(note).toContain('existing consultant');
+    expect(submitInboundIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'wants_consultant' }),
+    );
+  });
+
+  it('urgent issue: alerts, copies admins, and records the escalation', async () => {
+    const repo = await seeded('L5');
+    const submitInboundIssue = vi.fn().mockResolvedValue({
+      ok: true,
+      lead_id: 'L5',
+      lead_created: false,
+      owner: { name: 'Grace', email: 'grace@x.com' },
+      alerted: { to: ['grace@x.com'], cc: ['admin@x.com'] },
+      alert_sent: true,
+    });
+    const client = fakeGuidedBoostClient({ submitInboundIssue });
+    const result = await run(
+      TOOL.LOG_ISSUE,
+      { issue: 'My flight tomorrow was cancelled!', urgency: 'urgent' },
+      { repo, client },
+    );
+    if (result.status === 'ok') {
+      expect(result.payload['urgent']).toBe(true);
+      expect(result.payload['escalated']).toBe(true);
+    }
+    expect(submitInboundIssue).toHaveBeenCalledWith(expect.objectContaining({ urgency: 'urgent' }));
+    const record = await repo.getByRetellCallId(CALL_ID);
+    expect(record?.urgency).toBe(Urgency.URGENT);
+    expect(await events(repo)).toContain(LifecycleEvent.URGENT_ESCALATION);
+    const escalation = record?.lifecycle.find((l) => l.event === LifecycleEvent.URGENT_ESCALATION);
+    expect(escalation?.detail?.['adminCopied']).toBe(true);
+    expect(escalation?.detail?.['alertSent']).toBe(true);
+  });
+
+  it('no lead → Guided Boost creates one, and the owner/result are persisted', async () => {
+    const repo = await seeded(); // no lead on the record
+    const submitInboundIssue = vi.fn().mockResolvedValue({
+      ok: true,
+      lead_id: 'NEW1',
+      lead_created: true,
+      owner: { name: 'Grace', email: 'grace@x.com' },
+      alert_sent: true,
+    });
+    const client = fakeGuidedBoostClient({ submitInboundIssue });
+    await run(TOOL.LOG_ISSUE, { issue: 'I need help with my trip' }, { repo, client });
+
+    // Called with lead_id null + phone identifier; the API created the lead.
+    expect(submitInboundIssue).toHaveBeenCalledWith(
+      expect.objectContaining({ leadId: null, phone: '+12318310814' }),
+    );
+    const record = await repo.getByRetellCallId(CALL_ID);
+    expect(record?.leadId).toBe('NEW1');
+    expect(record?.leadCreated).toBe(true);
+    expect(record?.ownerName).toBe('Grace');
+    const issueEvent = record?.lifecycle.find((l) => l.event === LifecycleEvent.EXISTING_LEAD_ISSUE);
+    expect(issueEvent?.detail?.['delivery']).toBe('sent');
+    expect(issueEvent?.detail?.['leadCreated']).toBe(true);
+  });
+
+  it('preserves the issue locally when Guided Boost fails (safe response, call completes)', async () => {
+    const repo = await seeded('L5');
+    const submitInboundIssue = vi.fn().mockRejectedValue(new Error('gb down'));
+    const client = fakeGuidedBoostClient({ submitInboundIssue });
+    const result = await run(TOOL.LOG_ISSUE, { issue: 'Something is wrong' }, { repo, client });
+
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') expect(result.payload['logged']).toBe(true); // safe response
+    const record = await repo.getByRetellCallId(CALL_ID);
+    expect((record?.errors.length ?? 0)).toBeGreaterThan(0);
+    expect(await events(repo)).toContain(LifecycleEvent.CRM_UPDATE_FAILED);
+    expect(await events(repo)).toContain(LifecycleEvent.EXISTING_LEAD_ISSUE);
   });
 
   it('keeps a known caller who has no resolvable lead (no duplicate lead)', async () => {

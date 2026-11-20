@@ -377,6 +377,32 @@ export const inboundInquiryResponseSchema = z
 
 export type InboundInquiryResponse = z.infer<typeof inboundInquiryResponseSchema>;
 
+/**
+ * `POST /api/caller/inbound/issues` — the existing-guest issue API (Guided Boost
+ * "AN ISSUE ON AN EXISTING GUEST", API 3) response. Guided Boost writes the issue
+ * to the guest's lead, emails the assigned agent (admins too when urgent, or when
+ * there is no agent), and creates a lead if the caller had none. Permissive +
+ * passthrough; every field nullish. Treated as successful when `ok === true`.
+ */
+export const inboundIssueResponseSchema = z
+  .object({
+    ok: z.boolean().nullish(),
+    lead_id: idString.nullish(),
+    lead_created: z.boolean().nullish(),
+    owner: z
+      .object({ name: z.string().nullish(), email: z.string().nullish() })
+      .passthrough()
+      .nullish(),
+    alerted: z
+      .object({ to: z.array(z.string()).nullish(), cc: z.array(z.string()).nullish() })
+      .passthrough()
+      .nullish(),
+    alert_sent: z.boolean().nullish(),
+  })
+  .passthrough();
+
+export type InboundIssueResponse = z.infer<typeof inboundIssueResponseSchema>;
+
 /** The `{ "error": "..." }` body Guided Boost returns on failure. */
 export const errorBodySchema = z.object({ error: z.string() }).passthrough();
 

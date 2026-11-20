@@ -121,6 +121,10 @@ export const submitInquiryArgsSchema = leadFieldsSchema.extend({
 export const logIssueArgsSchema = z.object({
   issue: z.string().trim().min(1).max(5000),
   urgency: z.enum(['normal', 'urgent']).optional(),
+  /** Classification of the issue; defaults to `question` (or `wants_consultant`). */
+  kind: z
+    .enum(['question', 'existing_booking', 'wants_consultant', 'complaint', 'other'])
+    .optional(),
   /** The caller specifically asked for their existing consultant/owner. */
   request_existing_consultant: z.boolean().optional(),
 });

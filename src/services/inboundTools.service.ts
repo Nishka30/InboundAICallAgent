@@ -36,7 +36,7 @@ import {
 } from './callerIdentification.service.js';
 import { bookConsultation, getAvailableSlots } from './booking.service.js';
 import { submitInquiry } from './inquiry.service.js';
-import { defaultEscalationService, type EscalationService } from './escalation.service.js';
+import { submitIssue } from './issue.service.js';
 
 /**
  * Backend functions ("tools") the inbound Retell agent calls during a conversation.
@@ -62,8 +62,6 @@ export interface ToolRequestInput {
   now?: number;
   repo?: CallRepository;
   client?: GuidedBoostClient;
-  /** Injected for tests; otherwise the CRM-note escalation service is used. */
-  escalation?: EscalationService;
   config?: Env;
 }
 
@@ -114,7 +112,7 @@ export async function processToolRequest(input: ToolRequestInput): Promise<ToolR
   logger.info({ retellCallId: record.retellCallId, tool: name }, 'inbound tool called');
 
   const client = input.client;
-  const payload = await dispatch(name, request, record, repo, client, input.escalation);
+  const payload = await dispatch(name, request, record, repo, client);
   return { status: 'ok', name, payload };
 }
 
@@ -124,7 +122,6 @@ async function dispatch(
   record: CallRecord,
   repo: CallRepository,
   client: GuidedBoostClient | undefined,
-  escalation: EscalationService | undefined,
 ): Promise<Record<string, unknown>> {
   const rawArgs = readFunctionArgs(request);
 
@@ -140,7 +137,7 @@ async function dispatch(
     case TOOL.SUBMIT_INQUIRY:
       return submitInquiryTool(rawArgs, record, repo, client);
     case TOOL.LOG_ISSUE:
-      return logIssueTool(rawArgs, record, repo, client, escalation);
+      return logIssueTool(rawArgs, record, repo, client);
     case TOOL.ADD_CALL_NOTE:
       return addCallNoteTool(rawArgs, record, client);
     case TOOL.UPDATE_CALL_OUTCOME:
@@ -593,22 +590,25 @@ async function submitInquiryTool(
 }
 
 /**
- * Logs an existing caller's issue. A normal issue becomes a CRM note on the lead
- * (preserving the owner relationship); an URGENT issue is escalated via the
- * escalation service (currently an urgent CRM note, isolated so a real escalation
- * mechanism can plug in later). A request for the existing consultant is recorded.
+ * Logs an existing caller's issue to Guided Boost via the issue API (API 3), which
+ * writes it to the guest's lead, emails their assigned agent (admins too when
+ * urgent / when there is no agent), and creates a lead if the caller had none. This
+ * is the single issue/escalation path. The caller is never told anything failed: a
+ * delivery failure is preserved locally and surfaced only in the internal trace.
  */
 async function logIssueTool(
   rawArgs: Record<string, unknown>,
   record: CallRecord,
   repo: CallRepository,
   client: GuidedBoostClient | undefined,
-  escalation: EscalationService | undefined,
 ): Promise<Record<string, unknown>> {
   const args = logIssueArgsSchema.safeParse(rawArgs);
   if (!args.success) return { logged: false, error: 'An issue description is required.' };
   const { issue } = args.data;
   const urgent = args.data.urgency === 'urgent';
+  // Classify: explicit kind wins; otherwise a request for the existing consultant
+  // maps to wants_consultant, and everything else defaults to a question.
+  const kind = args.data.kind ?? (args.data.request_existing_consultant ? 'wants_consultant' : 'question');
 
   await repo.mergeCollectedInfo(record.retellCallId, { inquiry: issue });
   const patch: Parameters<CallRepository['update']>[1] = {
@@ -617,63 +617,33 @@ async function logIssueTool(
   if (args.data.request_existing_consultant === true) patch.requestedExistingConsultant = true;
   await repo.update(record.retellCallId, patch);
 
-  if (!record.leadId) {
-    // Known caller whose lead could not be resolved: keep it locally, do not create
-    // a duplicate lead. It still reaches the CRM in the end-of-call note if a lead
-    // appears; otherwise it is captured for follow-up.
-    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, {
-      urgent,
-      persisted: 'local_only',
-    });
+  const result = await submitIssue(
+    record.retellCallId,
+    repo,
+    { issue, kind, urgency: urgent ? 'urgent' : 'normal' },
+    client ? { client } : {},
+  );
+
+  if (result.outcome === 'failed') {
+    // Preserved locally for retry; the agent still gives a reassuring response.
     return {
       logged: true,
       persisted: 'local',
       urgent,
-      message: 'I’ve noted your issue for the team to follow up.',
+      message: urgent
+        ? 'I’ve flagged this as urgent for our team to follow up as a priority.'
+        : 'I’ve noted your issue for the team to follow up.',
     };
   }
 
-  if (urgent) {
-    const service = escalation ?? defaultEscalationService(client ?? undefined);
-    const outcome = service
-      ? await service.escalate({
-          leadId: record.leadId,
-          issue,
-          ownerName: record.ownerName,
-          ownerEmail: record.ownerEmail,
-        })
-      : { escalated: false, via: 'none' as const };
-    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.URGENT_ESCALATION, {
-      escalated: outcome.escalated,
-      via: outcome.via,
-    });
-    return {
-      logged: true,
-      urgent: true,
-      escalated: outcome.escalated,
-      message: 'I’ve flagged this as urgent for our team to follow up as a priority.',
-    };
-  }
-
-  // Normal issue: a CRM note on the lead, preserving the owner relationship.
-  const gb = gbClient(client);
-  await repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_LEAD_ISSUE, { urgent: false });
-  if (!gb) return { logged: true, persisted: 'local', message: 'I’ve noted your issue.' };
-
-  const noteLines = [`Inbound call — caller issue: ${issue}`];
-  if (args.data.request_existing_consultant) {
-    noteLines.push('Caller asked to speak with their existing consultant.');
-  }
-  if (record.ownerName || record.ownerEmail) {
-    noteLines.push(`Owner: ${record.ownerName ?? ''} ${record.ownerEmail ?? ''}`.trim());
-  }
-  try {
-    await gb.addCallNote(record.leadId, noteLines.join('\n'));
-    return { logged: true, message: 'I’ve added your issue to your record for follow-up.' };
-  } catch (error) {
-    logger.warn({ err: errName(error) }, 'log_issue tool: CRM note failed');
-    return { logged: true, persisted: 'local', message: 'I’ve noted your issue for follow-up.' };
-  }
+  return {
+    logged: true,
+    urgent,
+    escalated: result.alertSent === true,
+    message: urgent
+      ? 'I’ve flagged this as urgent for our team to follow up as a priority.'
+      : 'I’ve added your issue to your record for follow-up.',
+  };
 }
 
 // --- helpers -----------------------------------------------------------------

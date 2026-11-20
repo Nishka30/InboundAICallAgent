@@ -260,6 +260,65 @@ describe('identifyInboundCaller (POST /api/caller/inbound/identify)', () => {
   });
 });
 
+describe('submitInboundIssue (POST /api/caller/inbound/issues)', () => {
+  it('POSTs brand/issue/kind/urgency + write headers (single-shot)', async () => {
+    const { impl, calls } = fakeFetch({
+      status: 200,
+      body: { ok: true, lead_id: 'L5', lead_created: false, alert_sent: true },
+    });
+    const result = await client(impl).submitInboundIssue({
+      brand: 'HW',
+      issue: 'My booking looks wrong',
+      phone: '+13035550100',
+      leadId: 'L5',
+      kind: 'existing_booking',
+      urgency: 'urgent',
+      callId: 'call_1',
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.alert_sent).toBe(true);
+    expect(calls).toHaveLength(1); // not retried
+    expect(calls[0]?.url).toBe('https://gb.test/api/caller/inbound/issues');
+    expect(calls[0]?.init?.method).toBe('POST');
+    const body = JSON.parse(calls[0]?.init?.body as string) as Record<string, unknown>;
+    expect(body['brand']).toBe('HW');
+    expect(body['issue']).toBe('My booking looks wrong');
+    expect(body['kind']).toBe('existing_booking');
+    expect(body['urgency']).toBe('urgent');
+    expect(body['lead_id']).toBe('L5');
+    expect(body['phone']).toBe('+13035550100');
+    const headers = calls[0]?.init?.headers as Record<string, string>;
+    expect(headers['X-Lead-API-Key']).toBe('test_lead_key');
+    expect(headers['X-Agent-Email']).toBe('agent@test');
+    expect(headers['X-Agent-Name']).toBe('Agent');
+  });
+
+  it('defaults urgency to normal and sends lead_id null when absent', async () => {
+    const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
+    await client(impl).submitInboundIssue({ brand: 'HW', issue: 'A question', phone: '+13035550100' });
+    const body = JSON.parse(calls[0]?.init?.body as string) as Record<string, unknown>;
+    expect(body['urgency']).toBe('normal');
+    expect(body['lead_id']).toBeNull();
+    expect(body).not.toHaveProperty('summary');
+  });
+
+  it('throws a contract error on an invalid (non-object) response', async () => {
+    const { impl } = fakeFetch({ status: 200, body: 'not-an-object' });
+    await expect(
+      client(impl).submitInboundIssue({ brand: 'HW', issue: 'x', phone: '+13035550100' }),
+    ).rejects.toMatchObject({ name: 'GuidedBoostError', kind: 'contract' });
+  });
+
+  it('requires an issue', async () => {
+    const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
+    await expect(
+      client(impl).submitInboundIssue({ brand: 'HW', issue: '   ', phone: '+13035550100' }),
+    ).rejects.toMatchObject({ name: 'GuidedBoostError', kind: 'client' });
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe('no secret leakage', () => {
   it('never puts the api key in an error message', async () => {
     const { impl } = fakeFetch({ status: 500, body: { error: 'boom' } });
