@@ -21,7 +21,6 @@ import {
 import {
   BookingStatus,
   CallOutcome,
-  CallerType,
   LifecycleEvent,
   Urgency,
   type CallRecord,
@@ -30,9 +29,12 @@ import {
 import { callRepository, type CallRepository } from '../repositories/callRepository.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
 import { GuidedBoostError } from '../integrations/guidedBoost/errors.js';
-import { identifyCaller } from './callerIdentification.service.js';
+import {
+  identifyCaller,
+  type CallerPayment,
+  type CallerTrip,
+} from './callerIdentification.service.js';
 import { bookConsultation, getAvailableSlots } from './booking.service.js';
-import { resolveExistingCaller } from './existingCaller.service.js';
 import { submitInquiry } from './inquiry.service.js';
 import { defaultEscalationService, type EscalationService } from './escalation.service.js';
 
@@ -173,73 +175,80 @@ async function identifyCallerTool(
   const phone =
     args.success && args.data.phone_number ? args.data.phone_number : record.callerNumber;
 
+  // ONE authoritative Guided Boost call resolves identity, owner, newest lead,
+  // booking/consultation state and phone-verification together.
   const identity = await identifyCaller(phone, client ? { client } : {});
-
-  const known = identity.callerType !== CallerType.UNKNOWN;
+  const known = identity.known;
 
   const patch: Parameters<CallRepository['update']>[1] = { callerType: identity.callerType };
   if (identity.personKey) patch.personKey = identity.personKey;
+  if (identity.leadId) {
+    patch.leadId = identity.leadId;
+    patch.leadResolved = true;
+  }
   if (identity.salesAgentName) patch.ownerName = identity.salesAgentName;
   if (identity.salesAgentEmail) patch.ownerEmail = identity.salesAgentEmail;
+  // Persist the consultation guard so book_consultation refuses a duplicate even
+  // for an unverified caller (server-side enforcement, regardless of what the agent
+  // is told).
+  if (identity.hasExistingConsultation) patch.hasExistingConsultation = true;
   await repo.update(record.retellCallId, patch);
   if (identity.name) await repo.mergeCollectedInfo(record.retellCallId, { name: identity.name });
   await repo.recordLifecycle(record.retellCallId, LifecycleEvent.CALLER_IDENTIFIED, {
     callerType: identity.callerType,
     matched: known,
+    verifiedByPhone: identity.verifiedByPhone,
+    hasBooking: identity.hasBooking,
+    hasConsultation: identity.hasExistingConsultation,
   });
 
   if (!known) {
     await repo.recordLifecycle(record.retellCallId, LifecycleEvent.NEW_CALLER, {});
-    return { known: false, caller_type: identity.callerType };
+    return {
+      known: false,
+      caller_type: identity.callerType,
+      verified_by_phone: identity.verifiedByPhone,
+    };
   }
 
   await repo.recordLifecycle(record.retellCallId, LifecycleEvent.EXISTING_CALLER, {});
-
-  // Existing caller: resolve personKey -> leadId + detect an existing consultation
-  // + current owner, using the verified persons endpoint. Preserves identity on any
-  // failure (no duplicate lead), recording a resolution-failure for observability.
-  let resolved;
-  if (identity.personKey) {
-    resolved = await resolveExistingCaller(identity.personKey, client ? { client } : {});
-    const resPatch: Parameters<CallRepository['update']>[1] = {};
-    if (resolved.leadId) {
-      resPatch.leadId = resolved.leadId;
-      resPatch.leadResolved = true;
-    }
-    if (resolved.hasExistingConsultation) resPatch.hasExistingConsultation = true;
-    if (resolved.ownerName) resPatch.ownerName = resolved.ownerName;
-    if (resolved.ownerEmail) resPatch.ownerEmail = resolved.ownerEmail;
-    await repo.update(record.retellCallId, resPatch);
-
-    if (resolved.leadId) {
-      await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLVED, {
-        leadId: resolved.leadId,
-      });
-    } else if (resolved.reachable) {
-      await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
-        reason: 'no_lead_for_person',
-      });
-    } else {
-      await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLUTION_FAILED, {
-        reason: 'unreachable',
-      });
-    }
+  if (identity.leadId) {
+    await repo.recordLifecycle(record.retellCallId, LifecycleEvent.LEAD_RESOLVED, {
+      leadId: identity.leadId,
+    });
   }
 
-  const current = await repo.getByRetellCallId(record.retellCallId);
-  return {
+  // Always-safe identity fields (never payment/booking specifics).
+  const response: Record<string, unknown> = {
     known: true,
     caller_type: identity.callerType,
-    ...(identity.personKey ? { person_key: identity.personKey } : {}),
-    ...(current?.leadId ? { lead_id: current.leadId } : {}),
-    ...(identity.name ? { name: identity.name } : {}),
-    ...(current?.ownerName ? { existing_owner: current.ownerName } : {}),
-    ...(identity.leadStatus ? { lead_status: identity.leadStatus } : {}),
-    has_existing_consultation: Boolean(current?.hasExistingConsultation),
-    ...(resolved?.existingConsultationSummary
-      ? { existing_consultation: resolved.existingConsultationSummary }
-      : {}),
+    verified_by_phone: identity.verifiedByPhone,
+    has_existing_consultation: identity.hasExistingConsultation,
   };
+  if (identity.personKey) response['person_key'] = identity.personKey;
+  if (identity.personId) response['person_id'] = identity.personId;
+  if (identity.leadId) response['lead_id'] = identity.leadId;
+  if (identity.name) response['name'] = identity.name;
+  if (identity.salesAgentName) response['existing_owner'] = identity.salesAgentName;
+  if (identity.leadStatus) response['lead_status'] = identity.leadStatus;
+
+  if (identity.verifiedByPhone) {
+    // Verified: the caller phoned from the number on their own record, so
+    // booking/payment information may be surfaced (payment carries no amounts).
+    response['has_booking'] = identity.hasBooking;
+    if (identity.trip) response['trip'] = compactTrip(identity.trip);
+    if (identity.existingConsultationSummary) {
+      response['existing_consultation'] = identity.existingConsultationSummary;
+    }
+    if (identity.payment) response['payment'] = compactPayment(identity.payment);
+  } else {
+    // NOT verified by phone: do NOT expose or confirm any booking/payment/trip
+    // details. The agent should verify identity or route to the owner.
+    response['details_withheld'] = true;
+    response['routing'] = 'route_to_owner_unless_identity_verified';
+  }
+
+  return response;
 }
 
 async function getLeadTool(
@@ -734,4 +743,28 @@ function buildBookingNote(
 
 function errName(error: unknown): string {
   return error instanceof Error ? error.name : 'unknown';
+}
+
+/** Trip summary for the agent (verified callers only). Omits empty fields. */
+function compactTrip(trip: CallerTrip): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (trip.name) out['name'] = trip.name;
+  if (trip.startsOn) out['starts_on'] = trip.startsOn;
+  if (trip.endsOn) out['ends_on'] = trip.endsOn;
+  if (trip.state) out['state'] = trip.state;
+  return out;
+}
+
+/**
+ * Payment summary for the agent (verified callers only). Carries NO amounts — the
+ * API does not provide them — only status flags/dates. Omits null/empty fields.
+ */
+function compactPayment(payment: CallerPayment): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (payment.received !== undefined) out['received'] = payment.received;
+  if (payment.payments !== undefined) out['payments'] = payment.payments;
+  if (payment.lastPaidOn) out['last_paid_on'] = payment.lastPaidOn;
+  if (payment.byCard !== undefined) out['by_card'] = payment.byCard;
+  if (payment.chargedAs) out['charged_as'] = payment.chargedAs;
+  return out;
 }

@@ -42,7 +42,8 @@ async function run(name: string, args: Record<string, unknown>, extra: ToolExtra
 describe('new caller flow', () => {
   it('identifies an unknown caller as NEW', async () => {
     const repo = await seeded();
-    const client = fakeGuidedBoostClient({ findLeadByPhone: vi.fn().mockResolvedValue(null) });
+    // Default fake client returns known:false (a new caller).
+    const client = fakeGuidedBoostClient();
     const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
     if (result.status === 'ok') expect(result.payload['known']).toBe(false);
     expect(await events(repo)).toContain(LifecycleEvent.NEW_CALLER);
@@ -140,35 +141,30 @@ describe('new caller flow', () => {
 
 // --- Existing caller flows ---------------------------------------------------
 
-function personWith(leadId: string | null, appointments: unknown[] = []) {
-  return {
-    personKey: 'email:ada@x.com',
-    profile: { salesAgent: { name: 'Grace', email: 'grace@x.com' }, leadStatus: 'Open' },
-    leads: leadId
-      ? [
-          {
-            source: 'collector',
-            current: { id: leadId, updated_at: '2026-11-15T00:00:00Z', lead_status: 'Open' },
-          },
-        ]
-      : [],
-    appointments,
-  };
+/** Builds a fake client whose authoritative identify call returns `identify`. */
+function identifyClient(identify: Record<string, unknown> = {}) {
+  return fakeGuidedBoostClient({
+    identifyInboundCaller: vi.fn().mockResolvedValue({
+      known: true,
+      verified_by_phone: true,
+      has_booking: false,
+      person_id: 'p-1',
+      person_key: 'email:ada@x.com',
+      name: 'Ada',
+      owner: { name: 'Grace', email: 'grace@x.com' },
+      lead: null,
+      trip: null,
+      payment: null,
+      consultation: null,
+      ...identify,
+    }),
+  });
 }
 
 describe('existing caller flow', () => {
-  function identifyClient(overrides: Record<string, unknown> = {}) {
-    return fakeGuidedBoostClient({
-      findLeadByPhone: vi
-        .fn()
-        .mockResolvedValue({ personKey: 'email:ada@x.com', name: 'Ada', phone: '+12318310814' }),
-      ...overrides,
-    });
-  }
-
   it('resolves personKey → leadId with no existing consultation', async () => {
     const repo = await seeded();
-    const client = identifyClient({ getPerson: vi.fn().mockResolvedValue(personWith('L5')) });
+    const client = identifyClient({ lead: { lead_id: 'L5', status: 'Open' } });
     const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
 
     if (result.status === 'ok') {
@@ -186,22 +182,60 @@ describe('existing caller flow', () => {
   it('detects an existing consultation', async () => {
     const repo = await seeded();
     const client = identifyClient({
-      getPerson: vi.fn().mockResolvedValue(
-        personWith('L5', [
-          {
-            id: 'A1',
-            status: 'scheduled',
-            starts_at: '2026-12-01T10:00:00Z',
-            meeting_type: 'phone',
-          },
-        ]),
-      ),
+      lead: { lead_id: 'L5' },
+      consultation: {
+        starts_at: '2026-12-01T10:00:00Z',
+        agent_name: 'Grace',
+        agent_email: 'grace@x.com',
+        lead_id: 'L5',
+      },
     });
     const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
     if (result.status === 'ok') {
       expect(result.payload['has_existing_consultation']).toBe(true);
-      expect(result.payload['existing_consultation']).toContain('phone');
+      expect(result.payload['existing_consultation']).toContain('Grace');
     }
+    expect((await repo.getByRetellCallId(CALL_ID))?.hasExistingConsultation).toBe(true);
+  });
+
+  it('exposes booking/trip/payment to a phone-verified caller', async () => {
+    const repo = await seeded();
+    const client = identifyClient({
+      verified_by_phone: true,
+      has_booking: true,
+      lead: { lead_id: 'L5' },
+      trip: { name: 'Everest Base Camp', starts_on: '2027-04-16', state: 'upcoming' },
+      payment: { received: true, payments: 2, by_card: null, charged_as: null },
+    });
+    const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
+    if (result.status === 'ok') {
+      expect(result.payload['has_booking']).toBe(true);
+      expect(result.payload['trip']).toMatchObject({ name: 'Everest Base Camp' });
+      expect(result.payload['payment']).toMatchObject({ received: true, payments: 2 });
+    }
+  });
+
+  it('withholds booking/payment/trip when NOT verified by phone', async () => {
+    const repo = await seeded();
+    const client = identifyClient({
+      verified_by_phone: false,
+      has_booking: true,
+      lead: { lead_id: 'L5' },
+      trip: { name: 'Everest Base Camp', starts_on: '2027-04-16' },
+      payment: { received: true, payments: 2 },
+      consultation: { starts_at: '2027-01-01T10:00:00Z', agent_name: 'Grace' },
+    });
+    const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
+    if (result.status === 'ok') {
+      expect(result.payload['known']).toBe(true);
+      expect(result.payload['verified_by_phone']).toBe(false);
+      expect(result.payload['payment']).toBeUndefined();
+      expect(result.payload['trip']).toBeUndefined();
+      expect(result.payload['has_booking']).toBeUndefined();
+      expect(result.payload['existing_consultation']).toBeUndefined();
+      expect(result.payload['details_withheld']).toBe(true);
+    }
+    // Server-side guard still persists the consultation so booking cannot duplicate it.
     expect((await repo.getByRetellCallId(CALL_ID))?.hasExistingConsultation).toBe(true);
   });
 
@@ -275,11 +309,9 @@ describe('existing caller flow', () => {
     expect(note).toContain('existing consultant');
   });
 
-  it('continues safely when the person lookup is unavailable', async () => {
+  it('keeps a known caller who has no resolvable lead (no duplicate lead)', async () => {
     const repo = await seeded();
-    const client = identifyClient({
-      getPerson: vi.fn().mockRejectedValue(new Error('gb down')),
-    });
+    const client = identifyClient({ person_key: 'email:ada@x.com', lead: null });
     const result = await run(TOOL.IDENTIFY_CALLER, {}, { repo, client });
     if (result.status === 'ok') {
       expect(result.payload['known']).toBe(true);
@@ -289,7 +321,7 @@ describe('existing caller flow', () => {
     const record = (await repo.getByRetellCallId(CALL_ID));
     expect(record?.leadResolved).toBe(false);
     expect(record?.leadId).toBeUndefined();
-    expect(await events(repo)).toContain(LifecycleEvent.LEAD_RESOLUTION_FAILED);
+    expect(await events(repo)).toContain(LifecycleEvent.EXISTING_CALLER);
   });
 });
 

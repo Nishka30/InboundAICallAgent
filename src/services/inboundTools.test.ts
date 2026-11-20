@@ -48,9 +48,14 @@ describe('identify_caller tool', () => {
   it('identifies a known caller and records the person key', async () => {
     const repo = await seededRepo();
     const client = fakeGuidedBoostClient({
-      findLeadByPhone: vi
-        .fn()
-        .mockResolvedValue({ personKey: 'lead:L1', name: 'Ada', phone: '+12318310814' }),
+      identifyInboundCaller: vi.fn().mockResolvedValue({
+        known: true,
+        verified_by_phone: true,
+        person_key: 'lead:L1',
+        name: 'Ada',
+        owner: { name: 'Grace', email: 'grace@example.com' },
+        lead: { lead_id: 'L1', status: 'New Lead' },
+      }),
     });
     const { rawBody, signature } = toolPayload(TOOL.IDENTIFY_CALLER, {});
 
@@ -67,6 +72,7 @@ describe('identify_caller tool', () => {
       expect(result.payload['known']).toBe(true);
       expect(result.payload['person_key']).toBe('lead:L1');
       expect(result.payload['name']).toBe('Ada');
+      expect(result.payload['verified_by_phone']).toBe(true);
     }
     expect((await repo.getByRetellCallId(CALL_ID))?.personKey).toBe('lead:L1');
   });

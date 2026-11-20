@@ -28,6 +28,19 @@ export function fakeGuidedBoostClient(
 ): GuidedBoostClient {
   const base = {
     baseUrl: 'https://guided-boost.test',
+    identifyInboundCaller: vi.fn().mockResolvedValue({
+      known: false,
+      verified_by_phone: false,
+      has_booking: false,
+      person_id: null,
+      person_key: null,
+      name: null,
+      owner: null,
+      lead: null,
+      trip: null,
+      payment: null,
+      consultation: null,
+    }),
     findLeadByPhone: vi.fn().mockResolvedValue(null),
     getLead: vi.fn().mockResolvedValue({}),
     getPerson: vi.fn().mockResolvedValue({ leads: [], appointments: [] }),

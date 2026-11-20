@@ -133,6 +133,15 @@ const envSchema = z.object({
   GUIDED_BOOST_AGENT_EMAIL: z.string().min(1).default('inbound-caller@himalayanwonders.com'),
   GUIDED_BOOST_AGENT_NAME: z.string().min(1).default('AI Inbound Caller'),
 
+  /**
+   * Brand this inbound number belongs to, sent as `brand` to the Guided Boost
+   * caller-identification API. Accepts a brand code (HW, TH, PH, AH) or a domain
+   * such as `himalayanwonders.com`. Defaults to HW (Himalayan Wonders). Not a
+   * secret. Kept in config (not hard-coded in the flow) so a future per-number
+   * brand mapping can override it without touching business logic.
+   */
+  GUIDED_BOOST_BRAND: z.string().min(1).default('HW'),
+
   /** Per-request timeout for Guided Boost API calls. */
   GUIDED_BOOST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
 

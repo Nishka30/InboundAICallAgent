@@ -12,10 +12,12 @@ import {
   errorBodySchema,
   extractSearchResults,
   extractSlots,
+  inboundIdentifyResponseSchema,
   leadDetailSchema,
   newLeadResponseSchema,
   personHistorySchema,
   teamAppointmentResponseSchema,
+  type InboundIdentifyResponse,
   type LeadDetail,
   type PersonHistory,
   type SearchResult,
@@ -63,6 +65,9 @@ import type { MeetingType } from '../../domain/call.js';
 
 /** The phone-lookup search endpoint (real route; response contract unverified). */
 const SEARCH_PATH = '/api/crm/search';
+
+/** Authoritative inbound caller identification (Guided Boost "WHO IS RINGING"). */
+const INBOUND_IDENTIFY_PATH = '/api/caller/inbound/identify';
 
 /**
  * Whether Guided Boost's lead create/update endpoints are confirmed. FALSE until
@@ -137,6 +142,48 @@ export class GuidedBoostClient {
   }
 
   // --- Caller identification --------------------------------------------------
+
+  /**
+   * AUTHORITATIVE inbound caller identification — `POST /api/caller/inbound/identify`
+   * (Guided Boost "WHO IS RINGING", API 1). One call returns whether the caller is
+   * known, whether they are verified by the number they called from, their owner,
+   * newest lead, booking/consultation state and a (non-amount) payment summary.
+   *
+   * `brand` is required; at least one of `phone`/`email` is required (the caller's
+   * E.164 phone is sent whenever available). Idempotent, so it is retried on
+   * transient failures like a read. Sends `X-Lead-API-Key` plus the fixed
+   * `X-Agent-Email`/`X-Agent-Name` identity (the existing POST convention); the key
+   * is never logged. Throws `GuidedBoostError` on a permanent failure / bad shape —
+   * the caller-identification service turns that into a graceful "unknown caller".
+   */
+  async identifyInboundCaller(input: {
+    brand: string;
+    phone?: string | null;
+    email?: string | null;
+  }): Promise<InboundIdentifyResponse> {
+    const brand = input.brand.trim();
+    if (!brand) {
+      throw new GuidedBoostError('client', 'brand is required for caller identification', {
+        path: INBOUND_IDENTIFY_PATH,
+      });
+    }
+    const phone = input.phone ?? null;
+    const email = input.email ?? null;
+    if (!phone && !email) {
+      throw new GuidedBoostError('client', 'phone or email is required for caller identification', {
+        path: INBOUND_IDENTIFY_PATH,
+      });
+    }
+
+    const payload = await this.postJsonRetried(INBOUND_IDENTIFY_PATH, { brand, phone, email });
+    const parsed = inboundIdentifyResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new GuidedBoostError('contract', 'inbound identify response did not match the shape', {
+        path: INBOUND_IDENTIFY_PATH,
+      });
+    }
+    return parsed.data;
+  }
 
   /**
    * Looks up a caller by E.164 phone via `GET /api/crm/search`.
@@ -394,6 +441,36 @@ export class GuidedBoostClient {
   ): Promise<unknown> {
     const url = `${this.config.baseUrl}${path}`;
     return this.performRequest(method, url, path, this.writeHeaders(), JSON.stringify(body));
+  }
+
+  /**
+   * A POST that is safe to retry (an idempotent lookup such as identify). Mirrors
+   * `getJson`'s bounded backoff on transient failures, but POSTs a body with the
+   * write headers. Only ever use this for read-only POSTs, never for writes that
+   * mutate (`write` stays single-shot).
+   */
+  private async postJsonRetried(path: string, body: Record<string, unknown>): Promise<unknown> {
+    const url = `${this.config.baseUrl}${path}`;
+    const payload = JSON.stringify(body);
+    let lastError: GuidedBoostError | undefined;
+
+    for (let attempt = 0; attempt <= this.config.maxRetries; attempt += 1) {
+      if (attempt > 0) {
+        const delay = lastError?.retryAfterMs ?? backoffDelayMs(attempt);
+        logger.warn(
+          { path: sanitizePath(path), attempt, delayMs: delay, kind: lastError?.kind },
+          'retrying guided boost request',
+        );
+        await this.sleep(delay);
+      }
+      try {
+        return await this.performRequest('POST', url, path, this.writeHeaders(), payload);
+      } catch (error) {
+        if (!(error instanceof GuidedBoostError) || error.permanent) throw error;
+        lastError = error;
+      }
+    }
+    throw lastError ?? new GuidedBoostError('network', 'request failed', { path });
   }
 
   private async performRequest(

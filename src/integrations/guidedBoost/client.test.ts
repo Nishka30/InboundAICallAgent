@@ -180,6 +180,49 @@ describe('new-lead API (createLeadFromInboundInquiry)', () => {
   });
 });
 
+describe('identifyInboundCaller (POST /api/caller/inbound/identify)', () => {
+  it('POSTs brand/phone/email with the write headers', async () => {
+    const { impl, calls } = fakeFetch({
+      body: { known: true, verified_by_phone: true, person_key: 'lead:L1' },
+    });
+    const result = await client(impl).identifyInboundCaller({
+      brand: 'HW',
+      phone: '+13035550100',
+      email: null,
+    });
+
+    expect(result.known).toBe(true);
+    expect(result.verified_by_phone).toBe(true);
+    expect(calls[0]?.url).toBe('https://gb.test/api/caller/inbound/identify');
+    expect(calls[0]?.init?.method).toBe('POST');
+    const body = JSON.parse(calls[0]?.init?.body as string) as {
+      brand: string;
+      phone: string | null;
+      email: string | null;
+    };
+    expect(body).toEqual({ brand: 'HW', phone: '+13035550100', email: null });
+    const headers = calls[0]?.init?.headers as Record<string, string>;
+    expect(headers['X-Lead-API-Key']).toBe('test_lead_key');
+    expect(headers['X-Agent-Email']).toBe('agent@test');
+    expect(headers['X-Agent-Name']).toBe('Agent');
+  });
+
+  it('throws a contract error on an invalid response shape (known missing)', async () => {
+    const { impl } = fakeFetch({ body: { verified_by_phone: true } });
+    await expect(
+      client(impl).identifyInboundCaller({ brand: 'HW', phone: '+13035550100' }),
+    ).rejects.toMatchObject({ name: 'GuidedBoostError', kind: 'contract' });
+  });
+
+  it('refuses to call with neither phone nor email', async () => {
+    const { impl, calls } = fakeFetch({ body: { known: false } });
+    await expect(
+      client(impl).identifyInboundCaller({ brand: 'HW', phone: null, email: null }),
+    ).rejects.toMatchObject({ name: 'GuidedBoostError', kind: 'client' });
+    expect(calls).toHaveLength(0);
+  });
+});
+
 describe('no secret leakage', () => {
   it('never puts the api key in an error message', async () => {
     const { impl } = fakeFetch({ status: 500, body: { error: 'boom' } });

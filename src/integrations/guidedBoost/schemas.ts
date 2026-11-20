@@ -92,6 +92,69 @@ export function extractSearchResults(payload: unknown): SearchResult[] {
   return out;
 }
 
+/**
+ * `POST /api/caller/inbound/identify` — the authoritative inbound caller
+ * identification (Guided Boost "WHO IS RINGING", API 1). ONE call returns
+ * identity, owner, newest lead, booking/consultation state, verification and a
+ * (non-amount) payment summary. Permissive + passthrough and every nested field
+ * nullish, so an unexpected extra/`null` field never fails a live call. `known`
+ * is the one required field (new vs existing caller).
+ */
+export const inboundIdentifyResponseSchema = z
+  .object({
+    known: z.boolean(),
+    verified_by_phone: z.boolean().nullish(),
+    has_booking: z.boolean().nullish(),
+    person_id: idString.nullish(),
+    person_key: z.string().nullish(),
+    name: z.string().nullish(),
+    owner: z
+      .object({ name: z.string().nullish(), email: z.string().nullish() })
+      .passthrough()
+      .nullish(),
+    lead: z
+      .object({
+        lead_id: idString.nullish(),
+        status: z.string().nullish(),
+        created_at: z.string().nullish(),
+      })
+      .passthrough()
+      .nullish(),
+    trip: z
+      .object({
+        name: z.string().nullish(),
+        starts_on: z.string().nullish(),
+        ends_on: z.string().nullish(),
+        state: z.string().nullish(),
+        lead_id: idString.nullish(),
+      })
+      .passthrough()
+      .nullish(),
+    payment: z
+      .object({
+        received: z.boolean().nullish(),
+        payments: z.number().nullish(),
+        last_paid_on: z.string().nullish(),
+        // `by_card` and `charged_as` can currently be null.
+        by_card: z.boolean().nullish(),
+        charged_as: z.string().nullish(),
+      })
+      .passthrough()
+      .nullish(),
+    consultation: z
+      .object({
+        starts_at: z.string().nullish(),
+        agent_name: z.string().nullish(),
+        agent_email: z.string().nullish(),
+        lead_id: idString.nullish(),
+      })
+      .passthrough()
+      .nullish(),
+  })
+  .passthrough();
+
+export type InboundIdentifyResponse = z.infer<typeof inboundIdentifyResponseSchema>;
+
 /** `GET /api/crm/leads/<id>` — permissive detail view. */
 export const leadDetailSchema = z
   .object({
