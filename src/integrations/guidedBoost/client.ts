@@ -12,12 +12,14 @@ import {
   errorBodySchema,
   extractSearchResults,
   extractSlots,
+  inboundCallResponseSchema,
   inboundIdentifyResponseSchema,
   inboundInquiryResponseSchema,
   inboundIssueResponseSchema,
   leadDetailSchema,
   personHistorySchema,
   teamAppointmentResponseSchema,
+  type InboundCallResponse,
   type InboundIdentifyResponse,
   type InboundInquiryResponse,
   type InboundIssueResponse,
@@ -77,6 +79,20 @@ const INBOUND_INQUIRY_PATH = '/api/caller/inbound/inquiries';
 
 /** Existing-guest issue capture + alert (Guided Boost "AN ISSUE ON AN EXISTING GUEST"). */
 const INBOUND_ISSUE_PATH = '/api/caller/inbound/issues';
+
+/** Call-level record at call end (Guided Boost "call ended", API 4). */
+const INBOUND_CALL_PATH = '/api/caller/inbound/calls';
+
+export interface SubmitInboundCallInput {
+  brand: string;
+  callId: string;
+  outcome?: string;
+  summary?: string;
+  transcript?: string;
+  recordingUrl?: string;
+  startedAt?: string;
+  endedAt?: string;
+}
 
 /** The classification of an existing-guest issue. */
 export type IssueKind = 'question' | 'existing_booking' | 'wants_consultant' | 'complaint' | 'other';
@@ -485,6 +501,53 @@ export class GuidedBoostClient {
     if (!parsed.success) {
       throw new GuidedBoostError('contract', 'inbound issue response did not match the shape', {
         path: INBOUND_ISSUE_PATH,
+      });
+    }
+    return parsed.data;
+  }
+
+  /**
+   * Submits the call-level record — `POST /api/caller/inbound/calls` (Guided Boost
+   * "call ended", API 4). Sent at the end of EVERY inbound call so the CRM's Inbound
+   * Calls page has a row, even when no lead/inquiry/issue was created.
+   *
+   * `brand` + `call_id` are required; everything else is sent only when available.
+   * Keyed by `call_id` on the CRM side, so it is an idempotent upsert — but this
+   * client call is SINGLE-SHOT (not retried) and webhook-level event idempotency
+   * already prevents duplicate sends. Sends `X-Lead-API-Key` + the write identity;
+   * the key is never logged. Throws `GuidedBoostError` on a permanent failure /
+   * malformed response.
+   */
+  async submitInboundCall(input: SubmitInboundCallInput): Promise<InboundCallResponse> {
+    const brand = input.brand.trim();
+    if (!brand) {
+      throw new GuidedBoostError('client', 'brand is required for the call record', {
+        path: INBOUND_CALL_PATH,
+      });
+    }
+    const callId = input.callId.trim();
+    if (!callId) {
+      throw new GuidedBoostError('client', 'call_id is required for the call record', {
+        path: INBOUND_CALL_PATH,
+      });
+    }
+
+    const body: Record<string, unknown> = { brand, call_id: callId };
+    const put = (key: string, value: string | undefined): void => {
+      if (value !== undefined && value.length > 0) body[key] = value;
+    };
+    put('outcome', input.outcome);
+    put('summary', input.summary);
+    put('transcript', input.transcript);
+    put('recording_url', input.recordingUrl);
+    put('started_at', input.startedAt);
+    put('ended_at', input.endedAt);
+
+    const payload = await this.write('POST', INBOUND_CALL_PATH, body);
+    const parsed = inboundCallResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new GuidedBoostError('contract', 'inbound call response did not match the shape', {
+        path: INBOUND_CALL_PATH,
       });
     }
     return parsed.data;

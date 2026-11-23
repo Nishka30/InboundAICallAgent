@@ -403,6 +403,23 @@ export const inboundIssueResponseSchema = z
 
 export type InboundIssueResponse = z.infer<typeof inboundIssueResponseSchema>;
 
+/**
+ * `POST /api/caller/inbound/calls` — the call-level record API (Guided Boost "call
+ * ended", API 4) response. Sent at the end of every inbound call so the CRM's
+ * "Inbound calls" page has a row (outcome, summary, transcript, recording), keyed
+ * by `call_id`. Permissive + passthrough; treated as successful when `ok === true`.
+ */
+export const inboundCallResponseSchema = z
+  .object({
+    ok: z.boolean().nullish(),
+    call_id: z.string().nullish(),
+    created: z.boolean().nullish(),
+    lead_id: idString.nullish(),
+  })
+  .passthrough();
+
+export type InboundCallResponse = z.infer<typeof inboundCallResponseSchema>;
+
 /** The `{ "error": "..." }` body Guided Boost returns on failure. */
 export const errorBodySchema = z.object({ error: z.string() }).passthrough();
 

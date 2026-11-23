@@ -2,13 +2,16 @@ import { requireGuidedBoostConfig } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import {
   formatSlotLocal,
+  localDateKey,
+  localDayLabel,
+  localTimeLabel,
   normalizeTimezone,
   timezoneLabel,
-  zonedDateRangeUtc,
 } from '../lib/timezone.js';
 import { isMeetingType, type MeetingType } from '../domain/call.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
 import { GuidedBoostError } from '../integrations/guidedBoost/errors.js';
+import type { TeamSlot } from '../integrations/guidedBoost/schemas.js';
 
 /**
  * Inbound booking flow — reuses the SAME validated Guided Boost calendar contract
@@ -23,23 +26,49 @@ import { GuidedBoostError } from '../integrations/guidedBoost/errors.js';
  */
 
 const INTERACTIVE_TIMEOUT_MS = 8_000;
-const SLOT_LIMIT = 3;
+/** How many distinct DATES to offer first, and how many TIMES within a chosen date. */
+const DATE_LIMIT = 3;
+const TIME_LIMIT = 4;
 
-export interface OfferedSlot {
+/** One offered DATE (step 1: "which day works?"). */
+export interface OfferedDate {
+  date: string; // YYYY-MM-DD in the customer's zone
+  label: string; // e.g. "Monday, Nov 24"
+  times_available: number;
+}
+
+/** One offered TIME within a chosen date (step 2: "which time?"). */
+export interface OfferedTime {
+  /** The exact UTC instant to pass to book_consultation — never computed locally. */
   starts_at: string;
-  local: string;
+  local: string; // e.g. "Mon, Nov 24, 10:00 AM"
+  time: string; // e.g. "10:00 AM"
 }
 
 export type GetSlotsResult =
-  | { available: true; timezone: string; timezone_label: string; slots: OfferedSlot[] }
+  | {
+      available: true;
+      mode: 'dates';
+      timezone: string;
+      timezone_label: string;
+      dates: OfferedDate[];
+    }
+  | {
+      available: true;
+      mode: 'times';
+      timezone: string;
+      timezone_label: string;
+      date: string;
+      day_label: string;
+      slots: OfferedTime[];
+    }
   | { available: false; needs_timezone?: true; needs_date?: true; reason: string };
 
 export interface GetSlotsInput {
   leadId: string;
   timezone: string;
+  /** When set, return the TIMES for this local date; otherwise offer available DATES. */
   date?: string | undefined;
-  from?: string | undefined;
-  to?: string | undefined;
 }
 
 export interface BookInput {
@@ -76,7 +105,16 @@ function interactiveClient(deps: BookingDeps): GuidedBoostClient {
   });
 }
 
-/** Looks up availability in the customer's timezone. Never throws. */
+/**
+ * Looks up availability in the customer's timezone and returns it in a DATE-first
+ * shape. Never throws.
+ *
+ * It always fetches the CRM's full upcoming window (`GET team-slots?tz=…`, with NO
+ * `from`/`to`, so the CRM returns its ~14 days), then:
+ *   - with NO `date`: offers the next few available DATES ("which day works?");
+ *   - with a `date`: offers the TIMES on that local date ("which time?").
+ * Each offered time carries the exact CRM `starts_at`, so booking never invents a time.
+ */
 export async function getAvailableSlots(
   input: GetSlotsInput,
   deps: BookingDeps = {},
@@ -91,27 +129,10 @@ export async function getAvailableSlots(
     };
   }
 
-  // A single date is interpreted in the customer's zone; an explicit range is
-  // forwarded as-is; otherwise Guided Boost's default window is used.
-  let range: { from?: string; to?: string } = {};
-  if (input.date !== undefined) {
-    const computed = zonedDateRangeUtc(input.date, tz);
-    if (computed === null) {
-      return {
-        available: false,
-        needs_date: true,
-        reason: 'I didn’t catch a valid date. Which day works (for example 2026-11-20)?',
-      };
-    }
-    range = computed;
-  } else {
-    if (input.from !== undefined && !Number.isNaN(Date.parse(input.from))) range.from = input.from;
-    if (input.to !== undefined && !Number.isNaN(Date.parse(input.to))) range.to = input.to;
-  }
-
-  let slots;
+  // Full upcoming window — tz only, no from/to (the CRM returns ~14 days).
+  let slots: TeamSlot[];
   try {
-    ({ slots } = await interactiveClient(deps).getTeamSlots(input.leadId, tz, range));
+    ({ slots } = await interactiveClient(deps).getTeamSlots(input.leadId, tz));
   } catch (error) {
     logger.error(
       { leadId: input.leadId, err: errName(error) },
@@ -127,18 +148,62 @@ export async function getAvailableSlots(
   if (slots.length === 0) {
     return {
       available: false,
-      reason: input.date
-        ? 'No consultant is available that day. Ask the customer for another day.'
-        : 'No consultant is currently available. Take the customer’s details for follow-up.',
+      reason: 'No consultant is currently available. Take the customer’s details for follow-up.',
     };
   }
 
-  const offered: OfferedSlot[] = slots.slice(0, SLOT_LIMIT).map((s) => ({
-    starts_at: s.starts_at,
-    local: formatSlotLocal(s.starts_at, tz) ?? s.starts_at,
-  }));
+  // Group the window by the customer's local date, in chronological order.
+  const byDate = new Map<string, TeamSlot[]>();
+  for (const slot of slots) {
+    const key = localDateKey(slot.starts_at, tz);
+    if (!key) continue;
+    const bucket = byDate.get(key);
+    if (bucket) bucket.push(slot);
+    else byDate.set(key, [slot]);
+  }
+  const dateKeys = [...byDate.keys()].sort();
 
-  return { available: true, timezone: tz, timezone_label: timezoneLabel(tz), slots: offered };
+  // Step 2 — TIMES for the chosen date.
+  if (input.date !== undefined) {
+    const requested = input.date.trim();
+    const daySlots = (byDate.get(requested) ?? [])
+      .slice()
+      .sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+    if (daySlots.length === 0) {
+      return {
+        available: false,
+        needs_date: true,
+        reason: `I don’t have any times on ${requested}. Would another day work?`,
+      };
+    }
+    const first = daySlots[0] as TeamSlot;
+    const times: OfferedTime[] = daySlots.slice(0, TIME_LIMIT).map((s) => ({
+      starts_at: s.starts_at,
+      local: formatSlotLocal(s.starts_at, tz) ?? s.starts_at,
+      time: localTimeLabel(s.starts_at, tz) ?? s.starts_at,
+    }));
+    return {
+      available: true,
+      mode: 'times',
+      timezone: tz,
+      timezone_label: timezoneLabel(tz),
+      date: requested,
+      day_label: localDayLabel(first.starts_at, tz) ?? requested,
+      slots: times,
+    };
+  }
+
+  // Step 1 — offer the next few available DATES.
+  const dates: OfferedDate[] = dateKeys.slice(0, DATE_LIMIT).map((key) => {
+    const daySlots = byDate.get(key) as TeamSlot[];
+    const first = daySlots[0] as TeamSlot;
+    return {
+      date: key,
+      label: localDayLabel(first.starts_at, tz) ?? key,
+      times_available: daySlots.length,
+    };
+  });
+  return { available: true, mode: 'dates', timezone: tz, timezone_label: timezoneLabel(tz), dates };
 }
 
 /**

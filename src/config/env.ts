@@ -134,13 +134,21 @@ const envSchema = z.object({
   GUIDED_BOOST_AGENT_NAME: z.string().min(1).default('AI Inbound Caller'),
 
   /**
-   * Brand this inbound number belongs to, sent as `brand` to the Guided Boost
-   * caller-identification API. Accepts a brand code (HW, TH, PH, AH) or a domain
-   * such as `himalayanwonders.com`. Defaults to HW (Himalayan Wonders). Not a
-   * secret. Kept in config (not hard-coded in the flow) so a future per-number
-   * brand mapping can override it without touching business logic.
+   * DEFAULT / fallback brand sent to Guided Boost when the dialed number is not in
+   * `INBOUND_BRAND_NUMBERS` (e.g. the single-brand phase). Accepts a brand code
+   * (HW, TH, PH, AH) or a domain such as `himalayanwonders.com`. Not a secret.
    */
   GUIDED_BOOST_BRAND: z.string().min(1).default('HW'),
+
+  /**
+   * Per-number brand mapping: the number the caller DIALED determines the brand.
+   * Comma-separated `<e164>=<brand>` pairs, e.g.
+   * `+12318310814=HW,+1555XXXXXXX=TH`. Empty = single-brand mode (every call uses
+   * GUIDED_BOOST_BRAND). A dialed number not in a non-empty map falls back to the
+   * default brand with a warning (never silently a wrong brand; see `resolveBrand`).
+   * Not a secret; the caller's own number is NEVER used for brand.
+   */
+  INBOUND_BRAND_NUMBERS: optionalString(),
 
   /** Per-request timeout for Guided Boost API calls. */
   GUIDED_BOOST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),

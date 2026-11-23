@@ -20,6 +20,8 @@ import {
 import { callRepository, type CallRepository } from '../repositories/callRepository.js';
 import { identifyCaller } from './callerIdentification.service.js';
 import { finalizeCrmUpdate } from './crmUpdate.service.js';
+import { sendCallRecord } from './callRecord.service.js';
+import { resolveBrand } from '../lib/brand.js';
 import type { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
 
 /**
@@ -132,9 +134,10 @@ async function handleInboundHook(json: unknown, config: Env): Promise<InboundWeb
   };
 
   // Best-effort greeting context. Bounded and fully guarded: any failure just
-  // leaves the caller as unknown — the hook must return fast and never fail.
+  // leaves the caller as unknown — the hook must return fast and never fail. The
+  // brand is resolved from the DIALED number; the caller's own number identifies them.
   try {
-    const identity = await identifyCaller(fromNumber);
+    const identity = await identifyCaller(fromNumber, { brand: resolveBrand(toNumber) });
     if (identity.personKey ?? identity.leadId) {
       dynamicVariables['caller_known'] = 'yes';
       if (identity.personKey) dynamicVariables['person_key'] = identity.personKey;
@@ -253,6 +256,11 @@ async function handleLifecycleEvent(
   });
 
   await finalizeCrmUpdate(retellCallId, repo, crmClient ? { client: crmClient } : {});
+
+  // Send the call-level record to the CRM (API 4) at the end of EVERY call — even
+  // with no lead/inquiry/issue. Never throws; the durable Neon record is preserved
+  // on failure. Idempotent: this runs once per call (behind the event dedup guard).
+  await sendCallRecord(retellCallId, repo, crmClient ? { client: crmClient } : {});
 
   logger.info({ event, retellCallId }, 'inbound call analyzed and CRM finalized');
   return { status: 'processed', event, retellCallId, changed: true };

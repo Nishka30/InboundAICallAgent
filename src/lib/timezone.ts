@@ -153,6 +153,55 @@ export function formatSlotLocal(utcIso: string, tz: string): string | null {
   }
 }
 
+/** The customer-local calendar date (`YYYY-MM-DD`) of a UTC instant. `null` if unusable. */
+export function localDateKey(utcIso: string, tz: string): string | null {
+  const date = new Date(utcIso);
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    // en-CA renders ISO-style YYYY-MM-DD.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+  } catch {
+    return null;
+  }
+}
+
+/** A human day label, e.g. `Monday, Nov 24`. Falls back to the date key. */
+export function localDayLabel(utcIso: string, tz: string): string | null {
+  const date = new Date(utcIso);
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      weekday: 'long',
+      month: 'short',
+      day: 'numeric',
+    }).format(date);
+  } catch {
+    return null;
+  }
+}
+
+/** A human wall-clock time, e.g. `10:00 AM`. Falls back to null. */
+export function localTimeLabel(utcIso: string, tz: string): string | null {
+  const date = new Date(utcIso);
+  if (Number.isNaN(date.getTime())) return null;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    }).format(date);
+  } catch {
+    return null;
+  }
+}
+
 /** A human label for a timezone, e.g. `GMT+5:30`. Falls back to the id. */
 export function timezoneLabel(tz: string): string {
   try {

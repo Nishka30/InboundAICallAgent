@@ -27,6 +27,7 @@ import {
   type CallOutcomeName,
 } from '../domain/call.js';
 import { callRepository, type CallRepository } from '../repositories/callRepository.js';
+import { resolveBrand } from '../lib/brand.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
 import { GuidedBoostError } from '../integrations/guidedBoost/errors.js';
 import {
@@ -173,8 +174,12 @@ async function identifyCallerTool(
     args.success && args.data.phone_number ? args.data.phone_number : record.callerNumber;
 
   // ONE authoritative Guided Boost call resolves identity, owner, newest lead,
-  // booking/consultation state and phone-verification together.
-  const identity = await identifyCaller(phone, client ? { client } : {});
+  // booking/consultation state and phone-verification together. Brand is resolved
+  // from the DIALED number; `phone` (below) is the caller's OWN number.
+  const identity = await identifyCaller(phone, {
+    ...(client ? { client } : {}),
+    brand: resolveBrand(record.inboundNumber),
+  });
   const known = identity.known;
 
   const patch: Parameters<CallRepository['update']>[1] = { callerType: identity.callerType };
@@ -461,8 +466,6 @@ async function getSlotsTool(
       leadId: record.leadId,
       timezone: args.data.timezone,
       date: args.data.date,
-      from: args.data.from,
-      to: args.data.to,
     },
     client ? { client } : {},
   );
@@ -576,7 +579,10 @@ async function submitInquiryTool(
   if (data.consultation_requested === true) patch.consultationRequested = true;
   if (Object.keys(patch).length > 0) await repo.update(record.retellCallId, patch);
 
-  const result = await submitInquiry(record.retellCallId, repo, client ? { client } : {});
+  const result = await submitInquiry(record.retellCallId, repo, {
+    ...(client ? { client } : {}),
+    brand: resolveBrand(record.inboundNumber),
+  });
 
   return {
     captured: true,
@@ -621,7 +627,7 @@ async function logIssueTool(
     record.retellCallId,
     repo,
     { issue, kind, urgency: urgent ? 'urgent' : 'normal' },
-    client ? { client } : {},
+    { ...(client ? { client } : {}), brand: resolveBrand(record.inboundNumber) },
   );
 
   if (result.outcome === 'failed') {

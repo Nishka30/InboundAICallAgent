@@ -62,6 +62,7 @@ export function fakeGuidedBoostClient(
       alerted: { to: [], cc: [] },
       alert_sent: true,
     }),
+    submitInboundCall: vi.fn().mockResolvedValue({ ok: true, call_id: null, created: true }),
     updateLead: vi.fn().mockResolvedValue(undefined),
     addCallNote: vi.fn().mockResolvedValue(undefined),
     getTeamSlots: vi.fn().mockResolvedValue({ slots: [], mode: null }),

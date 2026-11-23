@@ -500,6 +500,63 @@ describe('existing caller flow', () => {
   });
 });
 
+// --- Phone / email / scheduler ordering -------------------------------------
+
+describe('caller phone and brand separation', () => {
+  it('sends the ORIGINAL caller number (from_number) as phone, never the dialed number', async () => {
+    const repo = createInMemoryCallRepository();
+    const submitInboundInquiry = vi.fn().mockResolvedValue({ ok: true, created: true });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry });
+    // from_number = the caller; to_number = the dialed/brand line (must NOT be phone).
+    const { rawBody, signature } = signedPayload(
+      {
+        call: { call_id: CALL_ID, from_number: '+13035550100', to_number: '+12318310814' },
+        name: TOOL.SUBMIT_INQUIRY,
+        args: { inquiry: 'Trip', email: 'ada@x.com' },
+      },
+      TEST_API_KEY,
+    );
+    await processToolRequest({ rawBody, signature, apiKey: TEST_API_KEY, repo, client });
+
+    const arg = submitInboundInquiry.mock.calls[0]?.[0] as { phone?: string; email?: string };
+    expect(arg.phone).toBe('+13035550100'); // caller's own number
+    expect(arg.phone).not.toBe('+12318310814'); // not the dialed/brand number
+    expect(arg.email).toBe('ada@x.com'); // email is passed through to the inquiry
+  });
+});
+
+describe('scheduler ordering (inquiry → lead_id → team-slots)', () => {
+  it('makes the team-slots request once the inquiry has provided a lead_id', async () => {
+    const repo = await seeded(); // NEW caller: no lead yet
+    const submitInboundInquiry = vi
+      .fn()
+      .mockResolvedValue({ ok: true, lead_id: 'NL9', created: true });
+    const getTeamSlots = vi
+      .fn()
+      .mockResolvedValue({ slots: [{ starts_at: '2026-12-01T10:00:00.000Z' }], mode: 'pool' });
+    const client = fakeGuidedBoostClient({ submitInboundInquiry, getTeamSlots });
+
+    // Before any inquiry, get_available_slots cannot run (no lead) and makes no request.
+    const early = await run(TOOL.GET_AVAILABLE_SLOTS, { timezone: 'UTC' }, { repo, client });
+    if (early.status === 'ok') expect(early.payload['available']).toBe(false);
+    expect(getTeamSlots).not.toHaveBeenCalled();
+
+    // Submit the inquiry first; it returns and persists the lead_id.
+    await run(TOOL.SUBMIT_INQUIRY, { inquiry: 'Everest', email: 'ada@x.com' }, { repo, client });
+    expect((await repo.getByRetellCallId(CALL_ID))?.leadId).toBe('NL9');
+
+    // Now the team-slots request fires with the lead_id and tz (no from/to).
+    const slots = await run(TOOL.GET_AVAILABLE_SLOTS, { timezone: 'UTC' }, { repo, client });
+    expect(getTeamSlots).toHaveBeenCalledTimes(1);
+    expect(getTeamSlots.mock.calls[0]?.[0]).toBe('NL9');
+    expect(getTeamSlots.mock.calls[0]?.[2]).toBeUndefined();
+    if (slots.status === 'ok') {
+      expect(slots.payload['available']).toBe(true);
+      expect(slots.payload['mode']).toBe('dates');
+    }
+  });
+});
+
 // --- Infrastructure ----------------------------------------------------------
 
 describe('tool infrastructure', () => {

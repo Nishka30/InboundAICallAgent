@@ -247,3 +247,104 @@ describe('processInboundWebhook — lifecycle', () => {
     expect(result.status).toBe('ignored');
   });
 });
+
+describe('processInboundWebhook — call record (API 4)', () => {
+  type CallArg = {
+    brand: string;
+    callId: string;
+    outcome?: string;
+    transcript?: string;
+    recordingUrl?: string;
+  };
+
+  async function runFullCall(opts: {
+    repo: ReturnType<typeof createInMemoryCallRepository>;
+    crmClient: ReturnType<typeof fakeGuidedBoostClient>;
+    leadId?: string;
+  }) {
+    const now = Date.now();
+    await processInboundWebhook({ ...startedPayload(now), apiKey: TEST_API_KEY, now, repo: opts.repo });
+    if (opts.leadId) await opts.repo.update(CALL_ID, { leadId: opts.leadId });
+    return processInboundWebhook({
+      ...analyzedPayload(now),
+      apiKey: TEST_API_KEY,
+      now,
+      repo: opts.repo,
+      crmClient: opts.crmClient,
+    });
+  }
+
+  it('sends the call record at call_analyzed with brand, call_id, outcome and transcript', async () => {
+    const repo = createInMemoryCallRepository();
+    const submitInboundCall = vi.fn().mockResolvedValue({ ok: true, created: true });
+    const crmClient = fakeGuidedBoostClient({
+      addCallNote: vi.fn().mockResolvedValue(undefined),
+      submitInboundCall,
+    });
+    await runFullCall({ repo, crmClient, leadId: 'L42' });
+
+    expect(submitInboundCall).toHaveBeenCalledTimes(1);
+    const arg = submitInboundCall.mock.calls[0]?.[0] as CallArg;
+    expect(arg.brand).toBe('HW');
+    expect(arg.callId).toBe(CALL_ID);
+    expect(arg.outcome).toBe(CallOutcome.INFORMATION_PROVIDED);
+    expect(arg.transcript).toContain('Everest');
+    const record = await repo.getByRetellCallId(CALL_ID);
+    expect(
+      record?.lifecycle.some(
+        (l) => l.event === LifecycleEvent.CRM_UPDATED && l.detail?.['target'] === 'call_record',
+      ),
+    ).toBe(true);
+  });
+
+  it('sends the call record even when there is no lead and no inquiry', async () => {
+    const repo = createInMemoryCallRepository();
+    const submitInboundCall = vi.fn().mockResolvedValue({ ok: true, created: true });
+    const crmClient = fakeGuidedBoostClient({ submitInboundCall });
+    await runFullCall({ repo, crmClient }); // no leadId
+
+    expect(submitInboundCall).toHaveBeenCalledTimes(1);
+    const arg = submitInboundCall.mock.calls[0]?.[0] as CallArg;
+    expect(arg.callId).toBe(CALL_ID);
+  });
+
+  it('records a call-record CRM failure without failing the webhook', async () => {
+    const repo = createInMemoryCallRepository();
+    const submitInboundCall = vi.fn().mockRejectedValue(new Error('gb down'));
+    const crmClient = fakeGuidedBoostClient({ submitInboundCall });
+    const result = await runFullCall({ repo, crmClient, leadId: 'L42' });
+
+    expect(result.status).toBe('processed');
+    const record = await repo.getByRetellCallId(CALL_ID);
+    expect(
+      record?.lifecycle.some(
+        (l) => l.event === LifecycleEvent.CRM_UPDATE_FAILED && l.detail?.['reason'] === 'call_record',
+      ),
+    ).toBe(true);
+    expect((record?.errors.length ?? 0)).toBeGreaterThan(0);
+  });
+
+  it('does not resend the call record on a duplicate call_analyzed event', async () => {
+    const repo = createInMemoryCallRepository();
+    const submitInboundCall = vi.fn().mockResolvedValue({ ok: true, created: true });
+    const crmClient = fakeGuidedBoostClient({ submitInboundCall });
+    const now = Date.now();
+    await processInboundWebhook({ ...startedPayload(now), apiKey: TEST_API_KEY, now, repo });
+    const analyzed = { ...analyzedPayload(now), apiKey: TEST_API_KEY, now, repo, crmClient };
+    await processInboundWebhook(analyzed);
+    await processInboundWebhook(analyzed); // duplicate
+
+    expect(submitInboundCall).toHaveBeenCalledTimes(1);
+  });
+
+  it('omits optional fields that are not available (e.g. no recording_url)', async () => {
+    const repo = createInMemoryCallRepository();
+    const submitInboundCall = vi.fn().mockResolvedValue({ ok: true, created: true });
+    const crmClient = fakeGuidedBoostClient({ submitInboundCall });
+    await runFullCall({ repo, crmClient }); // analyzedPayload has no recording_url
+
+    const arg = submitInboundCall.mock.calls[0]?.[0] as CallArg;
+    expect(arg.recordingUrl).toBeUndefined();
+    expect(arg.transcript).toContain('Everest');
+  });
+});
