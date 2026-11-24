@@ -95,7 +95,8 @@ export interface SubmitInboundCallInput {
 }
 
 /** The classification of an existing-guest issue. */
-export type IssueKind = 'question' | 'existing_booking' | 'wants_consultant' | 'complaint' | 'other';
+export type IssueKind =
+  'question' | 'existing_booking' | 'wants_consultant' | 'complaint' | 'other';
 export type IssueUrgency = 'normal' | 'urgent';
 
 export interface SubmitInboundIssueInput {

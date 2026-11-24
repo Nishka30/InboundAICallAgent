@@ -14,6 +14,7 @@ import {
   type UrgencyName,
 } from '../domain/call.js';
 import { getPool } from '../db/pool.js';
+import { env } from '../config/env.js';
 import type { CallRepository, CallRecordPatch, CreateInboundInput } from './callRepository.js';
 
 /**
@@ -36,6 +37,7 @@ const COLUMN_MAP: Record<string, string> = {
   agentId: 'agent_id',
   inboundNumber: 'inbound_number',
   callerNumber: 'caller_number',
+  brand: 'brand',
   outcome: 'outcome',
   callerType: 'caller_type',
   leadId: 'lead_id',
@@ -94,10 +96,12 @@ export class PostgresCallRepository implements CallRepository {
   async createOrGetInbound(input: CreateInboundInput): Promise<CallRecord> {
     const pool = getPool();
     const id = randomUUID();
+    // Resolved once by the caller; default to the fallback brand when absent.
+    const brand = input.brand ?? env.GUIDED_BOOST_BRAND;
 
     await pool.query(
-      `INSERT INTO inbound_calls (id, retell_call_id, agent_id, direction, inbound_number, caller_number)
-       VALUES ($1, $2, $3, COALESCE($4, 'inbound'), $5, $6)
+      `INSERT INTO inbound_calls (id, retell_call_id, agent_id, direction, inbound_number, caller_number, brand)
+       VALUES ($1, $2, $3, COALESCE($4, 'inbound'), $5, $6, $7)
        ON CONFLICT (retell_call_id) DO NOTHING`,
       [
         id,
@@ -106,16 +110,19 @@ export class PostgresCallRepository implements CallRepository {
         input.direction ?? null,
         input.inboundNumber ?? null,
         input.callerNumber ?? null,
+        brand,
       ],
     );
 
     // Backfill fields that may only now be known, without overwriting good data.
+    // Brand is set once (COALESCE), consistent with inbound_number.
     await pool.query(
       `UPDATE inbound_calls SET
          agent_id       = COALESCE(agent_id, $2),
          inbound_number = COALESCE(inbound_number, $3),
          caller_number  = COALESCE(caller_number, $4),
          direction      = COALESCE($5, direction),
+         brand          = COALESCE(brand, $6),
          updated_at     = now()
        WHERE retell_call_id = $1`,
       [
@@ -124,6 +131,7 @@ export class PostgresCallRepository implements CallRepository {
         input.inboundNumber ?? null,
         input.callerNumber ?? null,
         input.direction ?? null,
+        brand,
       ],
     );
 
@@ -156,7 +164,9 @@ export class PostgresCallRepository implements CallRepository {
     }
 
     const setClause =
-      assignments.length > 0 ? `${assignments.join(', ')}, updated_at = now()` : 'updated_at = now()';
+      assignments.length > 0
+        ? `${assignments.join(', ')}, updated_at = now()`
+        : 'updated_at = now()';
 
     await getPool().query(
       `UPDATE inbound_calls SET ${setClause} WHERE retell_call_id = $1`,
@@ -208,7 +218,12 @@ export class PostgresCallRepository implements CallRepository {
       `INSERT INTO call_events (call_id, retell_call_id, event_type, detail, is_error)
        SELECT c.id, c.retell_call_id, $2, $3::jsonb, $4
        FROM inbound_calls c WHERE c.retell_call_id = $1`,
-      [retellCallId, event, detail === undefined ? null : JSON.stringify(detail), ERROR_EVENTS.has(event)],
+      [
+        retellCallId,
+        event,
+        detail === undefined ? null : JSON.stringify(detail),
+        ERROR_EVENTS.has(event),
+      ],
     );
     await pool.query('UPDATE inbound_calls SET updated_at = now() WHERE retell_call_id = $1', [
       retellCallId,
@@ -298,6 +313,8 @@ function rowToRecord(row: Row): CallRecord {
     id: String(row.id),
     retellCallId: String(row.retell_call_id),
     direction: String(row.direction),
+    // Default guards any legacy row not yet backfilled (0002_brand + startup backfill).
+    brand: text(row.brand) ?? env.GUIDED_BOOST_BRAND,
     status: row.status as CallStatusName,
     outcome: row.outcome as CallOutcomeName,
     callerType: row.caller_type as CallerTypeName,

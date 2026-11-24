@@ -4,6 +4,7 @@ import { env, databaseEnabled } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { createShutdownHandler } from './lib/shutdown.js';
 import { runMigrations } from './db/migrate.js';
+import { backfillBrands } from './db/backfillBrands.js';
 import { closePool } from './db/pool.js';
 
 function closeServer(server: Server): Promise<void> {
@@ -62,6 +63,9 @@ async function start(): Promise<void> {
         { appliedCount: applied.length, ...(applied.length > 0 ? { applied } : {}) },
         'database migrations up to date',
       );
+      // Backfill brand for rows created before 0002_brand, using resolveBrand() on
+      // the stored inbound number. Idempotent and cheap (only null-brand rows).
+      await backfillBrands();
     } catch (error) {
       logger.fatal(
         { err: error instanceof Error ? { name: error.name, message: error.message } : undefined },
@@ -77,7 +81,11 @@ async function start(): Promise<void> {
 
   const server = app.listen(env.PORT, () => {
     logger.info(
-      { port: env.PORT, nodeEnv: env.NODE_ENV, persistence: databaseEnabled ? 'postgres' : 'memory' },
+      {
+        port: env.PORT,
+        nodeEnv: env.NODE_ENV,
+        persistence: databaseEnabled ? 'postgres' : 'memory',
+      },
       'inbound-caller server listening',
     );
   });

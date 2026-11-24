@@ -1,5 +1,4 @@
 import { logger } from '../lib/logger.js';
-import { resolveBrand } from '../lib/brand.js';
 import { LifecycleEvent } from '../domain/call.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
 import type { SubmitInboundCallInput } from '../integrations/guidedBoost/client.js';
@@ -48,7 +47,8 @@ export async function sendCallRecord(
   }
 
   const input: SubmitInboundCallInput = {
-    brand: deps.brand ?? resolveBrand(record.inboundNumber),
+    // The persisted call-record brand is the source of truth; an explicit dep wins.
+    brand: deps.brand ?? record.brand,
     callId: record.retellCallId,
     outcome: record.outcome,
   };

@@ -19,7 +19,9 @@ const { Pool } = pg;
 let pool: pg.Pool | null = null;
 
 function needsSsl(url: string): boolean {
-  return /sslmode=require|sslmode=verify|neon\.tech|render\.com|amazonaws\.com|\.pooler\./i.test(url);
+  return /sslmode=require|sslmode=verify|neon\.tech|render\.com|amazonaws\.com|\.pooler\./i.test(
+    url,
+  );
 }
 
 /** Returns the shared pool, creating it on first call. Throws if DATABASE_URL is unset. */

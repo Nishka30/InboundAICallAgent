@@ -1,4 +1,3 @@
-import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { BookingStatus, InquiryStatus, LifecycleEvent, type CallRecord } from '../domain/call.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
@@ -120,7 +119,8 @@ export async function submitInquiry(
     return { outcome: 'captured' };
   }
 
-  const input = buildInquiryInput(record, deps.brand ?? env.GUIDED_BOOST_BRAND);
+  // The persisted call-record brand is the source of truth; an explicit dep wins.
+  const input = buildInquiryInput(record, deps.brand ?? record.brand);
 
   try {
     const result = await client.submitInboundInquiry(input);

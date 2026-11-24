@@ -35,10 +35,7 @@ export function parseBrandMap(raw: string | undefined): Map<string, string> {
  * default brand and logs a WARNING (so a misconfiguration is visible rather than
  * silently sending a wrong brand). With no mapping configured, always the default.
  */
-export function resolveBrand(
-  dialedNumber: string | null | undefined,
-  source: Env = env,
-): string {
+export function resolveBrand(dialedNumber: string | null | undefined, source: Env = env): string {
   const fallback = source.GUIDED_BOOST_BRAND;
   const map = parseBrandMap(source.INBOUND_BRAND_NUMBERS);
   if (map.size === 0) return fallback;

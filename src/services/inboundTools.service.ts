@@ -101,12 +101,14 @@ export async function processToolRequest(input: ToolRequestInput): Promise<ToolR
   const name = request.name ?? '';
 
   // Bind the call SERVER-SIDE (create the record if the tool fired before the
-  // call_started webhook was processed — ordering is not guaranteed).
+  // call_started webhook was processed — ordering is not guaranteed). Resolve the
+  // brand from the dialled number available on this request; persisted once.
   const record = await repo.createOrGetInbound({
     retellCallId: request.call.call_id,
     agentId: request.call.agent_id ?? undefined,
     inboundNumber: request.call.to_number ?? undefined,
     callerNumber: request.call.from_number ?? undefined,
+    brand: resolveBrand(request.call.to_number ?? undefined),
   });
 
   await repo.recordLifecycle(record.retellCallId, LifecycleEvent.TOOL_CALLED, { tool: name });
@@ -178,7 +180,7 @@ async function identifyCallerTool(
   // from the DIALED number; `phone` (below) is the caller's OWN number.
   const identity = await identifyCaller(phone, {
     ...(client ? { client } : {}),
-    brand: resolveBrand(record.inboundNumber),
+    brand: record.brand,
   });
   const known = identity.known;
 
@@ -581,7 +583,7 @@ async function submitInquiryTool(
 
   const result = await submitInquiry(record.retellCallId, repo, {
     ...(client ? { client } : {}),
-    brand: resolveBrand(record.inboundNumber),
+    brand: record.brand,
   });
 
   return {
@@ -614,7 +616,8 @@ async function logIssueTool(
   const urgent = args.data.urgency === 'urgent';
   // Classify: explicit kind wins; otherwise a request for the existing consultant
   // maps to wants_consultant, and everything else defaults to a question.
-  const kind = args.data.kind ?? (args.data.request_existing_consultant ? 'wants_consultant' : 'question');
+  const kind =
+    args.data.kind ?? (args.data.request_existing_consultant ? 'wants_consultant' : 'question');
 
   await repo.mergeCollectedInfo(record.retellCallId, { inquiry: issue });
   const patch: Parameters<CallRepository['update']>[1] = {
@@ -627,7 +630,7 @@ async function logIssueTool(
     record.retellCallId,
     repo,
     { issue, kind, urgency: urgent ? 'urgent' : 'normal' },
-    { ...(client ? { client } : {}), brand: resolveBrand(record.inboundNumber) },
+    { ...(client ? { client } : {}), brand: record.brand },
   );
 
   if (result.outcome === 'failed') {

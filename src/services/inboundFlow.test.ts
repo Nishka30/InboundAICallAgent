@@ -91,7 +91,7 @@ describe('new caller flow', () => {
     );
 
     // Persisted + linked to the inbound call record.
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.inquiryStatus).toBe(InquiryStatus.SENT);
     expect(record?.leadId).toBe('NL1');
     expect(record?.leadCreated).toBe(true);
@@ -116,7 +116,9 @@ describe('new caller flow', () => {
 
   it('sends consultation_status booking_failed after a failed booking', async () => {
     const repo = await seeded('L1');
-    const submitInboundInquiry = vi.fn().mockResolvedValue({ ok: true, lead_id: 'L1', created: false });
+    const submitInboundInquiry = vi
+      .fn()
+      .mockResolvedValue({ ok: true, lead_id: 'L1', created: false });
     const client = fakeGuidedBoostClient({
       // chosen slot not in the returned set → booking refused
       getTeamSlots: vi
@@ -138,7 +140,11 @@ describe('new caller flow', () => {
     if (book.status === 'ok') expect(book.payload['booked']).toBe(false);
     expect((await repo.getByRetellCallId(CALL_ID))?.bookingStatus).toBe(BookingStatus.FAILED);
 
-    const inquiry = await run(TOOL.SUBMIT_INQUIRY, { booking_failed: true, inquiry: 'Everest' }, { repo, client });
+    const inquiry = await run(
+      TOOL.SUBMIT_INQUIRY,
+      { booking_failed: true, inquiry: 'Everest' },
+      { repo, client },
+    );
     if (inquiry.status === 'ok') expect(inquiry.payload['outcome']).toBe('sent');
     expect(submitInboundInquiry).toHaveBeenCalledWith(
       expect.objectContaining({ consultationStatus: 'booking_failed' }),
@@ -189,7 +195,7 @@ describe('new caller flow', () => {
     const result = await run(TOOL.SUBMIT_INQUIRY, { inquiry: 'Trip' }, { repo, client });
 
     if (result.status === 'ok') expect(result.payload['outcome']).toBe('sent');
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.inquiryStatus).toBe(InquiryStatus.SENT);
     expect(record?.leadId).toBe('L1');
     expect(record?.leadCreated).toBe(false);
@@ -202,10 +208,20 @@ describe('new caller flow', () => {
     const client = fakeGuidedBoostClient({ submitInboundInquiry });
     // A tool payload WITHOUT from_number, so the call record has no phone.
     const { rawBody, signature } = signedPayload(
-      { call: { call_id: CALL_ID }, name: TOOL.SUBMIT_INQUIRY, args: { email: 'ada@x.com', inquiry: 'Trip' } },
+      {
+        call: { call_id: CALL_ID },
+        name: TOOL.SUBMIT_INQUIRY,
+        args: { email: 'ada@x.com', inquiry: 'Trip' },
+      },
       TEST_API_KEY,
     );
-    const result = await processToolRequest({ rawBody, signature, apiKey: TEST_API_KEY, repo, client });
+    const result = await processToolRequest({
+      rawBody,
+      signature,
+      apiKey: TEST_API_KEY,
+      repo,
+      client,
+    });
 
     if (result.status === 'ok') expect(result.payload['outcome']).toBe('sent');
     expect(submitInboundInquiry).toHaveBeenCalledWith(
@@ -224,9 +240,9 @@ describe('new caller flow', () => {
       expect(result.payload['captured']).toBe(true);
       expect(result.payload['outcome']).toBe('failed');
     }
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.inquiryStatus).toBe(InquiryStatus.FAILED);
-    expect((record?.errors.length ?? 0)).toBeGreaterThan(0);
+    expect(record?.errors.length ?? 0).toBeGreaterThan(0);
     expect(await events(repo)).toContain(LifecycleEvent.CRM_UPDATE_FAILED);
   });
 
@@ -274,7 +290,7 @@ describe('existing caller flow', () => {
       expect(result.payload['lead_id']).toBe('L5');
       expect(result.payload['has_existing_consultation']).toBe(false);
     }
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.leadResolved).toBe(true);
     expect(record?.leadId).toBe('L5');
     expect(await events(repo)).toContain(LifecycleEvent.EXISTING_CALLER);
@@ -465,7 +481,9 @@ describe('existing caller flow', () => {
     expect(record?.leadId).toBe('NEW1');
     expect(record?.leadCreated).toBe(true);
     expect(record?.ownerName).toBe('Grace');
-    const issueEvent = record?.lifecycle.find((l) => l.event === LifecycleEvent.EXISTING_LEAD_ISSUE);
+    const issueEvent = record?.lifecycle.find(
+      (l) => l.event === LifecycleEvent.EXISTING_LEAD_ISSUE,
+    );
     expect(issueEvent?.detail?.['delivery']).toBe('sent');
     expect(issueEvent?.detail?.['leadCreated']).toBe(true);
   });
@@ -479,7 +497,7 @@ describe('existing caller flow', () => {
     expect(result.status).toBe('ok');
     if (result.status === 'ok') expect(result.payload['logged']).toBe(true); // safe response
     const record = await repo.getByRetellCallId(CALL_ID);
-    expect((record?.errors.length ?? 0)).toBeGreaterThan(0);
+    expect(record?.errors.length ?? 0).toBeGreaterThan(0);
     expect(await events(repo)).toContain(LifecycleEvent.CRM_UPDATE_FAILED);
     expect(await events(repo)).toContain(LifecycleEvent.EXISTING_LEAD_ISSUE);
   });
@@ -493,7 +511,7 @@ describe('existing caller flow', () => {
       expect(result.payload['person_key']).toBe('email:ada@x.com');
       expect(result.payload['lead_id']).toBeUndefined();
     }
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.leadResolved).toBe(false);
     expect(record?.leadId).toBeUndefined();
     expect(await events(repo)).toContain(LifecycleEvent.EXISTING_CALLER);

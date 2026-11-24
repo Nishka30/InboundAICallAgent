@@ -181,7 +181,8 @@ function mapIdentity(response: InboundIdentifyResponse, e164: string | null): Ca
 
   if (response.payment) {
     const payment: CallerPayment = {};
-    if (typeof response.payment.received === 'boolean') payment.received = response.payment.received;
+    if (typeof response.payment.received === 'boolean')
+      payment.received = response.payment.received;
     if (typeof response.payment.payments === 'number') payment.payments = response.payment.payments;
     if (response.payment.last_paid_on) payment.lastPaidOn = response.payment.last_paid_on;
     if (typeof response.payment.by_card === 'boolean') payment.byCard = response.payment.by_card;

@@ -98,7 +98,7 @@ describe('create_lead tool', () => {
 
     expect(result.status).toBe('ok');
     if (result.status === 'ok') expect(result.payload['created']).toBe(true);
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.leadId).toBe('L9');
     expect(record?.leadCreated).toBe(true);
     expect(createLead).toHaveBeenCalledTimes(1);
@@ -167,7 +167,7 @@ describe('create_lead tool', () => {
       expect(result.payload['created']).toBe(false);
       expect(result.payload['captured']).toBe(true);
     }
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.collectedInfo.name).toBe('Ada');
     expect(record?.collectedInfo.destination).toBe('Everest');
     expect(record?.leadId).toBeUndefined();
@@ -232,7 +232,7 @@ describe('book_consultation tool', () => {
       expect(result.payload['booked']).toBe(true);
       expect(result.payload['appointment_id']).toBe('A1');
     }
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.bookingStatus).toBe(BookingStatus.CONFIRMED);
     expect(record?.outcome).toBe(CallOutcome.BOOKED);
   });

@@ -296,7 +296,11 @@ describe('submitInboundIssue (POST /api/caller/inbound/issues)', () => {
 
   it('defaults urgency to normal and sends lead_id null when absent', async () => {
     const { impl, calls } = fakeFetch({ status: 200, body: { ok: true } });
-    await client(impl).submitInboundIssue({ brand: 'HW', issue: 'A question', phone: '+13035550100' });
+    await client(impl).submitInboundIssue({
+      brand: 'HW',
+      issue: 'A question',
+      phone: '+13035550100',
+    });
     const body = JSON.parse(calls[0]?.init?.body as string) as Record<string, unknown>;
     expect(body['urgency']).toBe('normal');
     expect(body['lead_id']).toBeNull();

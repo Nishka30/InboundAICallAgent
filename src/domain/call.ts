@@ -164,6 +164,13 @@ export interface CallRecord {
   inboundNumber?: string;
   /** The caller's number (Retell `from_number`), E.164 when valid. Sensitive. */
   callerNumber?: string;
+  /**
+   * The brand for this call, resolved ONCE from the dialled `inboundNumber` at
+   * record creation and persisted. This is the source of truth for the brand sent
+   * on every Guided Boost request for the call — services read it rather than
+   * re-resolving from the number on each tool call.
+   */
+  brand: string;
 
   status: CallStatusName;
   outcome: CallOutcomeName;

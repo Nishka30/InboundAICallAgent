@@ -107,7 +107,7 @@ describe('processInboundWebhook — lifecycle', () => {
     });
 
     expect(result.status).toBe('processed');
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.status).toBe(CallStatus.IN_PROGRESS);
     const events = record?.lifecycle.map((l) => l.event) ?? [];
     expect(events).toContain(LifecycleEvent.INBOUND_RECEIVED);
@@ -161,7 +161,7 @@ describe('processInboundWebhook — lifecycle', () => {
       crmClient,
     });
 
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.status).toBe(CallStatus.ANALYZED);
     expect(record?.transcript).toContain('Everest');
     expect(record?.summary).toContain('Everest');
@@ -189,7 +189,7 @@ describe('processInboundWebhook — lifecycle', () => {
     });
 
     expect(result.status).toBe('processed');
-    const record = (await repo.getByRetellCallId(CALL_ID));
+    const record = await repo.getByRetellCallId(CALL_ID);
     expect(record?.crmUpdatedAt).toBeUndefined();
     expect(record?.lifecycle.map((l) => l.event)).toContain(LifecycleEvent.CRM_UPDATE_FAILED);
     expect(record?.errors.length).toBeGreaterThan(0);
@@ -263,7 +263,12 @@ describe('processInboundWebhook — call record (API 4)', () => {
     leadId?: string;
   }) {
     const now = Date.now();
-    await processInboundWebhook({ ...startedPayload(now), apiKey: TEST_API_KEY, now, repo: opts.repo });
+    await processInboundWebhook({
+      ...startedPayload(now),
+      apiKey: TEST_API_KEY,
+      now,
+      repo: opts.repo,
+    });
     if (opts.leadId) await opts.repo.update(CALL_ID, { leadId: opts.leadId });
     return processInboundWebhook({
       ...analyzedPayload(now),
@@ -318,10 +323,11 @@ describe('processInboundWebhook — call record (API 4)', () => {
     const record = await repo.getByRetellCallId(CALL_ID);
     expect(
       record?.lifecycle.some(
-        (l) => l.event === LifecycleEvent.CRM_UPDATE_FAILED && l.detail?.['reason'] === 'call_record',
+        (l) =>
+          l.event === LifecycleEvent.CRM_UPDATE_FAILED && l.detail?.['reason'] === 'call_record',
       ),
     ).toBe(true);
-    expect((record?.errors.length ?? 0)).toBeGreaterThan(0);
+    expect(record?.errors.length ?? 0).toBeGreaterThan(0);
   });
 
   it('does not resend the call record on a duplicate call_analyzed event', async () => {

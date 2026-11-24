@@ -38,7 +38,9 @@ export async function finalizeCrmUpdate(
   if (!record.leadId) {
     // Nothing to attach the note to. Record it so it is visible, and mark done so
     // we do not retry forever against a call that never became a lead.
-    await repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, { reason: 'no_lead' });
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, {
+      reason: 'no_lead',
+    });
     await repo.update(retellCallId, { crmUpdatedAt: new Date().toISOString() });
     logger.warn({ retellCallId }, 'crm update skipped: call has no associated lead');
     return;
@@ -72,7 +74,9 @@ export async function finalizeCrmUpdate(
     logger.info({ retellCallId, leadId: record.leadId }, 'crm updated with inbound call note');
   } catch (error) {
     await repo.recordError(retellCallId, 'crm update: note delivery failed');
-    await repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, { reason: 'delivery' });
+    await repo.recordLifecycle(retellCallId, LifecycleEvent.CRM_UPDATE_FAILED, {
+      reason: 'delivery',
+    });
     logger.error(
       { retellCallId, leadId: record.leadId, err: error instanceof Error ? error.name : 'unknown' },
       'crm update: call note delivery failed; recorded for follow-up',

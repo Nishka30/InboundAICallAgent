@@ -185,13 +185,15 @@ async function handleLifecycleEvent(
 ): Promise<InboundWebhookResult> {
   const retellCallId = call.call_id;
 
-  // Ensure a record exists (idempotent create).
+  // Ensure a record exists (idempotent create). The brand is resolved ONCE here
+  // from the dialled number and persisted; later tools read the stored brand.
   await repo.createOrGetInbound({
     retellCallId,
     agentId: call.agent_id ?? undefined,
     direction: call.direction ?? 'inbound',
     inboundNumber: call.to_number ?? undefined,
     callerNumber: call.from_number ?? undefined,
+    brand: resolveBrand(call.to_number ?? undefined),
   });
 
   // Idempotency: apply each event type at most once per call.

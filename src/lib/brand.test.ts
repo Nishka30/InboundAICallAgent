@@ -42,4 +42,27 @@ describe('resolveBrand', () => {
     // +19999999999 is not in the map → default HW (with a logged warning), never TH.
     expect(resolveBrand('+19999999999', s)).toBe('HW');
   });
+
+  describe('live HW + PatagoniaHero (PH) mapping', () => {
+    // The exact production mapping: HW keeps its number, PH is the second brand.
+    const s = source({
+      GUIDED_BOOST_BRAND: 'HW',
+      INBOUND_BRAND_NUMBERS: '+12318310814=HW,+12088125606=PH',
+    });
+
+    it('resolves the HW number to HW', () => {
+      expect(resolveBrand('+12318310814', s)).toBe('HW');
+    });
+
+    it('resolves the PatagoniaHero number to PH', () => {
+      expect(resolveBrand('+12088125606', s)).toBe('PH');
+      // Also accepts a non-normalized form of the same number.
+      expect(resolveBrand('+1 (208) 812-5606', s)).toBe('PH');
+    });
+
+    it('still falls back to HW for an unmapped number', () => {
+      expect(resolveBrand('+14155550123', s)).toBe('HW');
+      expect(resolveBrand(null, s)).toBe('HW');
+    });
+  });
 });

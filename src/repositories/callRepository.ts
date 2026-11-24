@@ -13,7 +13,7 @@ import {
   type LifecycleEntry,
   type LifecycleEventName,
 } from '../domain/call.js';
-import { databaseEnabled } from '../config/env.js';
+import { databaseEnabled, env } from '../config/env.js';
 import { PostgresCallRepository } from './postgresCallRepository.js';
 
 /**
@@ -55,6 +55,12 @@ export interface CreateInboundInput {
   direction?: string | undefined;
   inboundNumber?: string | undefined;
   callerNumber?: string | undefined;
+  /**
+   * The brand for the call, resolved by the caller via `resolveBrand()` from the
+   * dialled number. Persisted once (set on first creation, not overwritten).
+   * Defaults to `GUIDED_BOOST_BRAND` when the caller does not supply one.
+   */
+  brand?: string | undefined;
 }
 
 /** A shallow patch of a subset of mutable call fields. */
@@ -126,6 +132,9 @@ class InMemoryCallRepository implements CallRepository {
       direction: input.direction ?? 'inbound',
       ...(input.inboundNumber === undefined ? {} : { inboundNumber: input.inboundNumber }),
       ...(input.callerNumber === undefined ? {} : { callerNumber: input.callerNumber }),
+      // Brand is resolved once at creation; falls back to the default brand when
+      // the caller does not supply one (e.g. tests, or no dialled number available).
+      brand: input.brand ?? env.GUIDED_BOOST_BRAND,
       status: CallStatus.RECEIVED,
       outcome: CallOutcome.UNKNOWN,
       callerType: CallerType.UNKNOWN,

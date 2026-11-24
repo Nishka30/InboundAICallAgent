@@ -1,4 +1,3 @@
-import { env } from '../config/env.js';
 import { logger } from '../lib/logger.js';
 import { LifecycleEvent, type CallRecord } from '../domain/call.js';
 import { GuidedBoostClient } from '../integrations/guidedBoost/client.js';
@@ -87,7 +86,8 @@ export async function submitIssue(
     return { outcome: 'failed' };
   }
 
-  const input = buildIssueInput(record, params, deps.brand ?? env.GUIDED_BOOST_BRAND);
+  // The persisted call-record brand is the source of truth; an explicit dep wins.
+  const input = buildIssueInput(record, params, deps.brand ?? record.brand);
 
   try {
     const result = await client.submitInboundIssue(input);
