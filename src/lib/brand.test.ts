@@ -43,11 +43,11 @@ describe('resolveBrand', () => {
     expect(resolveBrand('+19999999999', s)).toBe('HW');
   });
 
-  describe('live HW + PatagoniaHero (PH) mapping', () => {
-    // The exact production mapping: HW keeps its number, PH is the second brand.
+  describe('live four-brand mapping (HW, PH, TH, AH)', () => {
+    // The exact production mapping: each brand's dialed number resolves to its code.
     const s = source({
       GUIDED_BOOST_BRAND: 'HW',
-      INBOUND_BRAND_NUMBERS: '+12318310814=HW,+12088125606=PH',
+      INBOUND_BRAND_NUMBERS: '+12318310814=HW,+12088125606=PH,+12086266299=TH,+17622403272=AH',
     });
 
     it('resolves the HW number to HW', () => {
@@ -58,6 +58,16 @@ describe('resolveBrand', () => {
       expect(resolveBrand('+12088125606', s)).toBe('PH');
       // Also accepts a non-normalized form of the same number.
       expect(resolveBrand('+1 (208) 812-5606', s)).toBe('PH');
+    });
+
+    it('resolves the TrekkingHero number to TH', () => {
+      expect(resolveBrand('+12086266299', s)).toBe('TH');
+      expect(resolveBrand('+1 (208) 626-6299', s)).toBe('TH');
+    });
+
+    it('resolves the AdventureHero number to AH', () => {
+      expect(resolveBrand('+17622403272', s)).toBe('AH');
+      expect(resolveBrand('+1 (762) 240-3272', s)).toBe('AH');
     });
 
     it('still falls back to HW for an unmapped number', () => {
